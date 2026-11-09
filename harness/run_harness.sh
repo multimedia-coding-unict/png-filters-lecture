@@ -1,30 +1,30 @@
 #!/usr/bin/env bash
 # Execution harness for PNG filter-decision experiments.
 #
-# Runs the `filter_harness` example: encodes an input image with each requested
-# filter mode, decodes each result back (verifying the round-trip), and exports
-# the results into a result folder:
+# Runs the `filter_harness` example: encodes an input image through the normal
+# encoding process with the selected filter mode (default: adaptive), decodes the
+# result back (verifying the round-trip), and exports it into a result folder:
 #
 #   <out>/<image-stem>/
-#     <mode>.png                 image encoded with that filter mode
-#     decoded_<mode>.png         decoder output re-encoded losslessly
-#     summary.csv                per-mode encoded size and bits/pixel
+#     encoded.png            image encoded with the selected filter mode
+#     decoded.png            decoder output re-encoded losslessly
+#     summary.json           encoded size and bits/pixel
 #     debug/
-#       filter_map_<mode>.png    2D map: color of scanline y = filter chosen for it
-#       filters_<mode>.csv       row,filter_id,filter_name
+#       filter_map.png       2D map: color of scanline y = filter chosen for it
+#       filters.json         per-scanline filter decisions
 #
 # Usage:
-#   harness/run_harness.sh [--out DIR] [--modes LIST] IMAGE [IMAGE...]
+#   harness/run_harness.sh [--out DIR] [--mode MODE] IMAGE [IMAGE...]
 #
-# Modes: none,sub,up,avg,paeth,adaptive,minentropy or "all" (default).
-# Can also be set through the FILTER_MODES environment variable.
+# Mode: none, sub, up, avg, paeth, adaptive (default) or minentropy.
+# Can also be set through the FILTER_MODE environment variable.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.." # repository root, so `cargo run` finds the crate
 
 OUT="results"
-MODES="${FILTER_MODES:-all}"
+MODE="${FILTER_MODE:-adaptive}"
 IMAGES=()
 
 while [ $# -gt 0 ]; do
@@ -33,8 +33,8 @@ while [ $# -gt 0 ]; do
         OUT="$2"
         shift 2
         ;;
-    --modes)
-        MODES="$2"
+    --mode)
+        MODE="$2"
         shift 2
         ;;
     -h | --help)
@@ -63,7 +63,7 @@ for img in "${IMAGES[@]}"; do
     stem="$(basename "$img")"
     stem="${stem%.*}"
     echo "=== $img -> $OUT/$stem ==="
-    cargo run --release --example filter_harness -- "$img" "$OUT/$stem" "$MODES"
+    cargo run --release --example filter_harness -- "$img" "$OUT/$stem" "$MODE"
 done
 
 echo "Results written under $OUT/"

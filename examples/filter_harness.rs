@@ -1,29 +1,29 @@
 //! Execution harness for experimenting with PNG scanline filter decision modes.
 //!
-//! For a given input image this encodes it once per requested filter mode with
-//! this crate's encoder, decodes each result back and verifies the round-trip,
-//! and exports everything into an output folder:
+//! For a given input image this runs the normal encoding process once, with the
+//! selected filter mode (default: the encoder's own default, `adaptive`), decodes
+//! the result back and verifies the round-trip, and exports everything into an
+//! output folder:
 //!
 //! ```text
 //! <out>/
-//!   <mode>.png                 image encoded with that filter mode
-//!   decoded_<mode>.png         decoder output of the above, re-encoded losslessly
-//!   summary.csv                per-mode encoded size
+//!   encoded.png           image encoded with the selected filter mode
+//!   decoded.png           decoder output of the above, re-encoded losslessly
+//!   summary.json          encoded size and bits/pixel
 //!   debug/
-//!     filter_map_<mode>.png    2D map: the color of scanline y is the filter chosen for it
-//!     filters_<mode>.csv       row,filter_id,filter_name
+//!     filter_map.png      2D map: the color of scanline y is the filter chosen for it
+//!     filters.json        per-scanline filter decisions
 //! ```
 //!
 //! Usage:
 //!
 //! ```text
-//! cargo run --release --example filter_harness -- <input.png> [output_dir] [modes...]
+//! cargo run --release --example filter_harness -- <input.png> [output_dir] [mode]
 //! ```
 //!
-//! Modes are `none`, `sub`, `up`, `avg`, `paeth`, `adaptive`, `minentropy`, or
-//! `all` (default). The input must be an 8-bit PNG (gray, gray+alpha, RGB or
-//! RGBA); non-interlaced input works best since the filter maps are one row per
-//! scanline.
+//! Modes are `none`, `sub`, `up`, `avg`, `paeth`, `adaptive` (default) or
+//! `minentropy`. The input must be an 8-bit PNG (gray, gray+alpha, RGB or RGBA);
+//! non-interlaced input works best since the filter map is one row per scanline.
 
 use std::{
     env, fs,
@@ -34,7 +34,8 @@ use std::{
 
 use png::{BitDepth, ColorType, Decoder, Encoder, Filter};
 
-const ALL_MODES: &[(&str, Filter)] = &[
+/// All selectable modes, in filter-type-byte order.
+const MODES: &[(&str, Filter)] = &[
     ("none", Filter::NoFilter),
     ("sub", Filter::Sub),
     ("up", Filter::Up),
@@ -43,6 +44,8 @@ const ALL_MODES: &[(&str, Filter)] = &[
     ("adaptive", Filter::Adaptive),
     ("minentropy", Filter::MinEntropy),
 ];
+
+const DEFAULT_MODE: &str = "adaptive";
 
 /// Name of a filter type byte, as recorded in the filter log.
 fn filter_name(id: u8) -> &'static str {
@@ -68,8 +71,7 @@ fn filter_color(id: u8) -> [u8; 3] {
     }
 }
 
-fn decode(path: &Path) -> Result<(u32, u32, ColorType, Vec<u8>), Box<dyn std::error::Error>> {
-    let file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+fn decode(path: &Path) -> Result<(u32, u32, ColorType, Vec<u8>), Box<dyn std::error::Error>> {    let file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut reader = Decoder::new(BufReader::new(file))
         .read_info()
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -121,7 +123,8 @@ fn encode(
     record: bool,
 ) -> Result<Encoded, Box<dyn std::error::Error>> {
     let file = fs::File::create(path)?;
-    let mut encoder = Encoder::new(Box::new(BufWriter::new(file)) as Box<dyn std::io::Write>, width, height);
+    let mut encoder =
+        Encoder::new(Box::new(BufWriter::new(file)) as Box<dyn std::io::Write>, width, height);
     encoder.set_color(color_type);
     encoder.set_depth(BitDepth::Eight);
     encoder.set_filter(mode);
@@ -159,23 +162,40 @@ fn write_filter_map(
     Ok(())
 }
 
-fn write_filter_csv(path: &Path, log: &[u8]) -> Result<(), std::io::Error> {
-    let mut csv = String::from("row,filter_id,filter_name\n");
+fn write_filter_json(path: &Path, width: u32, height: u32, log: &[u8]) -> Result<(), std::io::Error> {
+    let mut json = format!(
+        "{{\n  \"width\": {width},\n  \"height\": {height},\n  \"filters\": [\n"
+    );
     for (row, &id) in log.iter().enumerate() {
-        csv.push_str(&format!("{},{},{}\n", row, id, filter_name(id)));
+        json.push_str(&format!(
+            "    {{\"row\": {row}, \"filter_id\": {id}, \"filter_name\": \"{}\"}}{}\n",
+            filter_name(id),
+            if row + 1 < log.len() { "," } else { "" }
+        ));
     }
-    fs::write(path, csv)
+    json.push_str("  ]\n}\n");
+    fs::write(path, json)
 }
 
-fn parse_args(args: &[String]) -> Result<(PathBuf, PathBuf, Vec<(&'static str, Filter)>), String> {
+fn parse_mode(name: &str) -> Result<Filter, String> {
+    MODES
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, filter)| *filter)
+        .ok_or_else(|| {
+            format!(
+                "unknown filter mode: {name} (expected one of {})",
+                MODES.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+            )
+        })
+}
+
+fn parse_args(args: &[String]) -> Result<(PathBuf, PathBuf, Filter), String> {
     if args.is_empty() || args.len() > 3 {
         return Err(format!(
-            "usage: filter_harness <input.png> [output_dir] [modes...]\n\
-             modes: {}all",
-            ALL_MODES
-                .iter()
-                .map(|(name, _)| format!("{name},"))
-                .collect::<String>()
+            "usage: filter_harness <input.png> [output_dir] [mode]\n\
+             modes: {} (default: {DEFAULT_MODE})",
+            MODES.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
         ));
     }
 
@@ -189,27 +209,17 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, PathBuf, Vec<(&'static str, F
             PathBuf::from("results").join(stem)
         }
     };
-
-    let mode_names: Vec<&str> = match args.get(2) {
-        Some(spec) if spec != "all" => spec.split(',').map(|m| m.trim()).collect(),
-        _ => ALL_MODES.iter().map(|(name, _)| *name).collect(),
+    let mode = match args.get(2) {
+        Some(name) => parse_mode(name)?,
+        None => parse_mode(DEFAULT_MODE).unwrap(),
     };
 
-    let mut modes = Vec::new();
-    for name in mode_names {
-        let mode = ALL_MODES
-            .iter()
-            .find(|(known, _)| *known == name)
-            .ok_or_else(|| format!("unknown filter mode: {name}"))?;
-        modes.push(*mode);
-    }
-
-    Ok((input, out_dir, modes))
+    Ok((input, out_dir, mode))
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
-    let (input, out_dir, modes) = parse_args(&args)?;
+    let (input, out_dir, mode) = parse_args(&args)?;
 
     let (width, height, color_type, raw) = decode(&input)?;
     println!(
@@ -223,59 +233,59 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     fs::create_dir_all(out_dir.join("debug"))?;
 
-    let mut summary = String::from("mode,encoded_bytes,bits_per_pixel\n");
-    for (name, mode) in modes {
-        let encoded_path = out_dir.join(format!("{name}.png"));
-        let encoded = encode(
-            &encoded_path,
-            width,
-            height,
-            color_type,
-            &raw,
-            mode,
-            true,
-        )?;
+    // Encode with the selected filter mode, recording the per-scanline decision.
+    let encoded_path = out_dir.join("encoded.png");
+    let encoded = encode(&encoded_path, width, height, color_type, &raw, mode, true)?;
+    let bytes = encoded.bytes;
 
-        // Decode the result again and verify the round-trip against the source.
-        let (dwidth, dheight, dcolor, decoded) = decode(&encoded_path)?;
-        if (dwidth, dheight, dcolor) != (width, height, color_type) || decoded != raw {
-            return Err(format!("{name}: round-trip through {} mismatched the input; the exported filter map would be misleading", encoded_path.display()).into());
-        }
-
-        // Export the decoder's output as its own image, re-encoded without any
-        // filtering so it is a plain lossless representation of the decoded data.
-        let decoded_path = out_dir.join(format!("decoded_{name}.png"));
-        encode(
-            &decoded_path,
-            width,
-            height,
-            color_type,
-            &decoded,
-            Filter::NoFilter,
-            false,
-        )?;
-
-        write_filter_map(
-            &out_dir.join("debug").join(format!("filter_map_{name}.png")),
-            width,
-            height,
-            &encoded.filter_log,
-        )?;
-        write_filter_csv(
-            &out_dir.join("debug").join(format!("filters_{name}.csv")),
-            &encoded.filter_log,
-        )?;
-
-        let bits_per_pixel = encoded.bytes as f64 * 8.0 / (width as f64 * height as f64);
-        summary.push_str(&format!("{name},{},{}\n", encoded.bytes, bits_per_pixel));
-        println!(
-            "  {name:>10}: {:>10} bytes  ({bits_per_pixel:.2} bits/pixel)",
-            encoded.bytes
-        );
+    // Decode the result again and verify the round-trip against the source.
+    let (dwidth, dheight, dcolor, decoded) = decode(&encoded_path)?;
+    if (dwidth, dheight, dcolor) != (width, height, color_type) || decoded != raw {
+        return Err(format!(
+            "round-trip through {} mismatched the input; the exported filter map would be misleading",
+            encoded_path.display()
+        )
+        .into());
     }
 
-    fs::write(out_dir.join("summary.csv"), summary)?;
-    println!("results written to {}", out_dir.display());
+    // Export the decoder's output as its own image, re-encoded without any
+    // filtering so it is a plain lossless representation of the decoded data.
+    let decoded_path = out_dir.join("decoded.png");
+    encode(
+        &decoded_path,
+        width,
+        height,
+        color_type,
+        &decoded,
+        Filter::NoFilter,
+        false,
+    )?;
+
+    write_filter_map(
+        &out_dir.join("debug").join("filter_map.png"),
+        width,
+        height,
+        &encoded.filter_log,
+    )?;
+    write_filter_json(
+        &out_dir.join("debug").join("filters.json"),
+        width,
+        height,
+        &encoded.filter_log,
+    )?;
+
+    let bits_per_pixel = bytes as f64 * 8.0 / (width as f64 * height as f64);
+    fs::write(
+        out_dir.join("summary.json"),
+        format!(
+            "{{\n  \"mode\": \"{}\",\n  \"encoded_bytes\": {bytes},\n  \"bits_per_pixel\": {bits_per_pixel}\n}}\n",
+            format!("{mode:?}").to_lowercase(),
+        ),
+    )?;
+    println!(
+        "  encoded: {bytes} bytes ({bits_per_pixel:.2} bits/pixel), results in {}",
+        out_dir.display()
+    );
     Ok(())
 }
 
