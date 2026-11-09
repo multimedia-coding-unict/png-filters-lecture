@@ -13,7 +13,7 @@ use crate::common::{
     FrameControl, ImageOffset, Info, OffsetUnit, ParameterError, ParameterErrorKind,
     PixelDimensions, ScaledFloat, Unit,
 };
-use crate::filter::{filter, Filter};
+use crate::filter::{RowFilter, filter, Filter};
 use crate::text_metadata::{
     encode_iso_8859_1, EncodableTextChunk, ITXtChunk, TEXtChunk, TextEncodingError, ZTXtChunk,
 };
@@ -167,6 +167,9 @@ struct Options {
     validate_sequence: bool,
     compression: DeflateCompression,
     interlace: bool,
+    /// Record the filter decision made for each scanline, exposed through
+    /// [`Writer::filter_log`].
+    filter_log: bool,
 }
 
 impl<'a, W: Write> Encoder<'a, W> {
@@ -334,6 +337,16 @@ impl<'a, W: Write> Encoder<'a, W> {
         self.options.filter = filter;
     }
 
+    /// Enable recording of the filter chosen for each encoded scanline.
+    ///
+    /// When enabled, the filter decision made for every scanline written by
+    /// [`Encoder::write_header`] (through the returned [`Writer`]) is stored and
+    /// can be retrieved with [`Writer::filter_log`]. This is a debugging and
+    /// experimentation aid; recording is disabled by default.
+    pub fn set_filter_log(&mut self, on: bool) {
+        self.options.filter_log = on;
+    }
+
     /// Set the fraction of time every frame is going to be displayed, in seconds.
     ///
     /// *Note that this parameter can be set for each individual frame after
@@ -493,6 +506,9 @@ pub struct Writer<W: Write> {
     /// A flag to note when the IEND chunk was already added.
     /// This is only set on code paths that drop `Self` to control the destructor.
     iend_written: bool,
+    /// The filter decision made for each encoded scanline, when recording was
+    /// enabled through [`Options::filter_log`].
+    filter_log: Option<Vec<u8>>,
 }
 
 /// Contains the subset of attributes of [Info] needed for [Writer] to function
@@ -579,6 +595,7 @@ fn write_fdat_chunk<W: Write>(
 
 impl<W: Write> Writer<W> {
     fn new(w: W, info: PartialInfo, options: Options) -> Writer<W> {
+        let filter_log = options.filter_log.then(Vec::new);
         Writer {
             w,
             info,
@@ -586,6 +603,24 @@ impl<W: Write> Writer<W> {
             images_written: 0,
             animation_written: 0,
             iend_written: false,
+            filter_log,
+        }
+    }
+
+    /// The filter type chosen for each encoded scanline, if recording was enabled
+    /// through [`Encoder::set_filter_log`].
+    ///
+    /// For non-interlaced images the slice contains one entry per scanline, in
+    /// row-major order. For interlaced images it contains one entry per scanline
+    /// in Adam7 pass order. Each entry is the filter type byte as defined by the
+    /// PNG specification (0..=4).
+    pub fn filter_log(&self) -> Option<&[u8]> {
+        self.filter_log.as_deref()
+    }
+
+    fn record_filter(&mut self, filter_type: RowFilter) {
+        if let Some(log) = &mut self.filter_log {
+            log.push(filter_type as u8);
         }
     }
 
@@ -868,7 +903,11 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
 
-    fn zlib_encode_image_data(&self, data: &[u8], (width, height): (u32, u32)) -> Result<Vec<u8>> {
+    fn zlib_encode_image_data(
+        &mut self,
+        data: &[u8],
+        (width, height): (u32, u32),
+    ) -> Result<Vec<u8>> {
         #[derive(Clone)]
         enum LineCursor<'lt> {
             All {
@@ -958,6 +997,7 @@ impl<W: Write> Writer<W> {
                 while let Some((_pass, line, _prev)) = interlaced_lines.next_pass_and_line() {
                     compressor.write_data(&[0])?;
                     compressor.write_data(line)?;
+                    self.record_filter(RowFilter::NoFilter);
                 }
 
                 compressor.finish()?.into_inner()
@@ -976,6 +1016,7 @@ impl<W: Write> Writer<W> {
 
                     let filter_type = filter(filter_method, bpp, prev, line, &mut current[1..]);
                     current[0] = filter_type as u8;
+                    self.record_filter(filter_type);
                     compressor.write_data(&current)?;
 
                     interlaced_lines.remember_previous();
@@ -1017,6 +1058,7 @@ impl<W: Write> Writer<W> {
                     }
 
                     let filter_type = filter(filter_method, bpp, prev, line, &mut current);
+                    self.record_filter(filter_type);
                     zlib.write_all(&[filter_type as u8])?;
                     zlib.write_all(&current)?;
 
@@ -1545,6 +1587,9 @@ pub struct StreamWriter<'a, W: Write> {
     filter: Filter,
     fctl: Option<FrameControl>,
     compression: DeflateCompression,
+    /// The filter decision made for each encoded scanline, when recording was
+    /// enabled through [`Options::filter_log`].
+    filter_log: Option<Vec<u8>>,
 }
 
 impl<'a, W: Write> StreamWriter<'a, W> {
@@ -1570,6 +1615,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         let in_len = writer.info.raw_row_length() - 1;
         let filter = writer.options.filter;
         let compression = writer.options.compression;
+        let filter_log = writer.options.filter_log.then(Vec::new);
         let prev_buf = vec![0; in_len];
         let curr_buf = vec![0; in_len];
         let filtered_buf = vec![0; in_len];
@@ -1591,7 +1637,18 @@ impl<'a, W: Write> StreamWriter<'a, W> {
             to_write,
             fctl,
             compression,
+            filter_log,
         })
+    }
+
+    /// The filter type chosen for each encoded scanline, if recording was enabled
+    /// through [`Encoder::set_filter_log`].
+    ///
+    /// The slice contains one entry per completed scanline, in row-major order.
+    /// Each entry is the filter type byte as defined by the PNG specification
+    /// (0..=4).
+    pub fn filter_log(&self) -> Option<&[u8]> {
+        self.filter_log.as_deref()
     }
 
     /// Set the used filter type.
@@ -1898,6 +1955,9 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
                 &self.curr_buf,
                 &mut self.filtered_buf,
             );
+            if let Some(log) = &mut self.filter_log {
+                log.push(filter_type as u8);
+            }
             // This can't fail as the other variant is used only to allow the zlib encoder to finish
             match &mut self.writer {
                 FrameState::Flate2(wrt) => {
