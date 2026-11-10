@@ -92,7 +92,8 @@ auto-vectorization via the 32-byte chunks — no hand-written SIMD.
 
 One loop handles both non-interlaced and Adam7 interlaced data, and the
 previous-row buffer is **reset to zeros at the start of each Adam7 pass** —
-matching the spec, where each pass restarts prediction. Then the per-row
+matching the spec, where each pass restarts prediction
+([§8 "Interlacing and pass extraction"](https://www.w3.org/TR/png/#8Interlace)). Then the per-row
 behaviour depends on the DEFLATE backend.
 
 <details class="impl-ref" open>
@@ -138,7 +139,8 @@ swapped (L1969).
 ## Bytes per pixel in prediction
 
 `bpp` ("bytes per pixel in prediction") comes from the image info; sub-8-bit
-images use `One` — one byte covers several pixels, per the spec.
+images use `One` — one byte covers several pixels, per the spec
+([§9.2 "Filter types for filter method 0"](https://www.w3.org/TR/png/#9Filter-types)).
 
 <details class="impl-ref" open>
 <summary>Implementation reference</summary>

@@ -1,26 +1,24 @@
 # The five PNG scanline filters
 
-## The neighbourhood
+> **Convention for the rest of these notes:** the PNG spec describes filtering
+> on the 2-D pixel grid, but most of the logic is per scanline. From this page
+> on we therefore talk about **one scanline holding the values of a single
+> color channel** — a one-dimensional sequence of bytes `x = [x0, x1, …, xn-1]`.
+> When a filter needs the row above, "the previous scanline" just means the
+> byte sequence at the same indices; the subdivision into scanlines is
+> implicit in all examples below.
+>
+> The authoritative description is the spec — [§7.2 "Scanlines"](https://www.w3.org/TR/png/#7Scanline),
+> [§9 "Filtering"](https://www.w3.org/TR/png/#9Filters): the 2-D neighbourhood
+> (bytes `a`, `b`, `c`), the exact filter-type definitions and the edge
+> behaviour are defined there and not repeated here.
 
-Every byte of the current scanline is predicted from already-*reconstructed*
-bytes (the decoder un-filters left-to-right, top-to-bottom, so these are always
-available):
-
-```text
-previous row:      c   b
-current row:       a   x   ←  x is the byte being filtered
-```
-
-- `a` = byte immediately to the **left** of `x` (same channel of the previous pixel)
-- `b` = byte **above** `x` (previous scanline, same column)
-- `c` = byte **above-left**
-
-All arithmetic is **modulo 256** (`wrapping_sub` / `wrapping_add` in Rust).
-
-**Important:** the offsets are in *bytes*, not pixels. For RGB (3 bytes/pixel),
-`a` is 3 bytes to the left; this distance is called **bpp** ("bytes per pixel
-in prediction"). For bit depths < 8, `bpp` is 1 byte — one byte holds several
-sub-byte pixels, which is why the spec defines it this way.
+Each byte `x[i]` of the scanline is stored as a residual
+`x[i] − predictor` (all arithmetic mod 256 — `wrapping_sub` / `wrapping_add`
+in Rust), where the predictor uses up to three already-reconstructed bytes:
+`a` to the left, `b` above, `c` above-left. Offsets are in **bytes**, not
+pixels: `a` is `bpp` bytes to the left, where `bpp` is the spec's "bytes per
+pixel in prediction" (1 byte for bit depths < 8).
 
 <details class="impl-ref" open>
 <summary>Implementation reference</summary>
@@ -33,15 +31,17 @@ The code comments in `src/common.rs` L86–90 and L818–822 warn that
 
 </details>
 
-## The five filters (spec §9, filter-type bytes 0–4)
+## The five filters (spec §9.2, filter-type bytes 0–4)
 
-| Byte | Name | Residual stored = `x −` ... |
+| Byte | Name | Residual stored |
 | ---: | --- | --- |
-| 0 | None | `0` (raw byte) |
-| 1 | Sub | `a` |
-| 2 | Up | `b` |
-| 3 | Avg | `⌊(a + b) / 2⌋` |
-| 4 | Paeth | `PaethPredictor(a, b, c)` |
+| 0 | None | `x` (raw byte) |
+| 1 | Sub | `x − a` |
+| 2 | Up | `x − b` |
+| 3 | Avg | `x − ⌊(a + b) / 2⌋` |
+| 4 | Paeth | `x − PaethPredictor(a, b, c)` |
+
+Full definitions: [spec §9.2 "Filter types for filter method 0"](https://www.w3.org/TR/png/#9Filter-types).
 
 <details class="impl-ref" open>
 <summary>Implementation reference</summary>
@@ -64,13 +64,24 @@ enum — exactly the values allowed in the per-scanline filter byte
 
 </details>
 
+All per-filter examples below use one channel (`bpp = 1`) and the same
+schematic: `previous` = the scanline above, `x` = scanline being filtered,
+`prediction` = per-byte predictor, `res` = stored residuals (in bold).
+
 ### 1. Sub — predict from the left
 
-`residual = x − a`. The first `bpp` bytes of a row have no left neighbour, so
-`a = 0` and they are stored raw.
+`residual = x − a`. The first `bpp` bytes of the scanline have no left
+neighbour, so `a = 0` and they are stored raw.
 
-**Wins on:** horizontal gradients and smooth colour transitions.
-Example, `bpp = 1`, row `[10, 20, 30, 40]` → Sub residuals `[10, 10, 10, 10]`.
+**Wins on:** horizontal gradients and smooth colour transitions (`previous` is
+never read):
+
+<pre>
+previous   = [ 7,  7,  7,  7]
+x          = [10, 20, 30, 40]
+prediction = [ 0, 10, 20, 30]
+res        = <b>[10, 10, 10, 10]</b>
+</pre>
 
 <details class="impl-ref" open>
 <summary>Implementation reference</summary>
@@ -82,14 +93,32 @@ Example, `bpp = 1`, row `[10, 20, 30, 40]` → Sub residuals `[10, 10, 10, 10]`.
 
 ### 2. Up — predict from above
 
-`residual = x − b`. **Wins on:** vertical repetition, flat regions, anything
-where the row looks like the previous row. Row `[10, 20, 30, 40]` filtered
-with the identical previous row → `[0, 0, 0, 0]`. Perfect for DEFLATE.
+`residual = x − b`, with `b = previous[i]` the byte at the same index of the
+previous scanline. **Wins on:** vertical repetition and flat regions:
+
+<pre>
+previous   = [ 8, 20, 28, 36]
+x          = [10, 20, 30, 40]
+prediction = [ 8, 20, 28, 36]
+res        = <b>[ 2,  0,  2,  4]</b>
+</pre>
+
+With `previous = x` the residuals would be all `0`, which DEFLATE compresses
+perfectly.
 
 ### 3. Avg — predict from the mean of left and above
 
 `residual = x − ⌊(a + b) / 2⌋`. A compromise between Sub and Up; good when the
-image changes smoothly in *both* directions.
+image changes smoothly in *both* directions:
+
+<pre>
+previous   = [ 8, 20, 28, 36]
+x          = [10, 20, 30, 40]
+prediction = [ 4, 15, 24, 33]
+res        = <b>[ 6,  5,  6,  7]</b>
+</pre>
+
+(e.g. at `i = 1`: `a = 10`, `b = 20`, so `20 − ⌊(10 + 20) / 2⌋ = 5`.)
 
 Nice implementation detail: the encoder doesn't compute `(a + b) / 2` with a
 wider integer. It uses the branchless, overflow-free identity
@@ -106,22 +135,33 @@ with the comment linking to aggregate.org/MAGIC.
 
 ### 4. Paeth — predict from the "closest" neighbour
 
-The Paeth predictor picks whichever of `a`, `b`, `c` is closest to the linear
-estimate `p = a + b − c`:
+Paeth picks whichever of `a`, `b`, `c` is closest to the linear estimate
+`p = a + b − c`, breaking ties in the order `a`, then `b`
+([spec §9.4](https://www.w3.org/TR/png/#9Filter-type-4-Paeth)):
 
-```text
-pa = |p − a| = |b − c|
-pb = |p − b| = |a − c|
-pc = |p − c| = |a + b − 2c|
+<pre>
+previous   = [10, 10, 10, 10]
+x          = [10, 20, 30, 40]
+prediction = [10, 10, 20, 30]
+res        = <b>[ 0, 10, 10, 10]</b>
+</pre>
 
-if pa ≤ pb and pa ≤ pc → a
-else if pb ≤ pc        → b
-else                   → c        (ties: a, then b — spec-mandated order)
-```
+Byte by byte (`p = a + b − c`; ties resolve in the order `a`, `b`, `c`):
+
+<pre>
+i=0: a= 0, b=10, c= 0  p=10  ->  picks <b>b=10</b>  res = 10-10 = <b> 0</b>
+i=1: a=10, b=10, c=10  p=10  ->  picks <b>a=10</b>  res = 20-10 = <b>10</b>
+i=2: a=20, b=10, c=10  p=20  ->  picks <b>a=20</b>  res = 30-20 = <b>10</b>
+i=3: a=30, b=10, c=10  p=30  ->  picks <b>a=30</b>  res = 40-30 = <b>10</b>
+</pre>
+
+At `i = 0` the edges make `a = c = 0`, so Paeth picks `b = 10`. From `i = 1` on
+`b = c = 10`, hence `p = a` and Paeth picks `a` — the same residuals as Sub
+here (Up on the same input would give `[0, 10, 20, 30]`).
 
 **Wins on:** most natural photos — edges and textures in arbitrary directions.
 The encoder computes it with an optimised **all-unsigned, vectorization-friendly
-variant (FPNGE, proposed by Luca Versari)**.
+variant**.
 
 <details class="impl-ref" open>
 <summary>Implementation reference</summary>
@@ -135,28 +175,24 @@ The file contains three provably equivalent implementations — there's even an
 
 ### 0. None — no prediction
 
-Store `x` raw. Sometimes the residual is *larger* than the original byte (e.g.
-noisy data), and None is the honest choice.
+Store `x` raw (`previous` is ignored):
 
-## Worked example
+<pre>
+previous   = [ 8, 20, 28, 36]
+x          = [10, 20, 30, 40]
+prediction = [ 0,  0,  0,  0]
+res        = <b>[10, 20, 30, 40]</b>
+</pre>
 
-`bpp = 1` (8-bit grayscale). Previous row `b-row = [10, 20, 30, 40]`,
-current row `x = [12, 19, 33, 41]`:
+Sometimes a *predictive* filter produces residuals larger than the original
+bytes (e.g. noisy data), and None is the honest choice.
 
-| filter | residuals (mod 256) | comment |
-| --- | --- | --- |
-| None | `12, 19, 33, 41` | raw |
-| Sub | `12, 7, 14, 8` | `x − left` |
-| Up | `2, 255, 3, 1` | `19 − 20 = −1 → 255` (wraps!) |
-| Avg | `7, 3, 9, 5` | `x − ⌊(a+b)/2⌋` |
-| Paeth | `2, 255, 3, 1` | here Paeth picks `b`, same as Up |
+## Edge behaviour
 
-## Edge case: the first row
-
-There is no previous row. The encoder simply starts with a **zeroed previous
-row**, and the decoder special-cases an empty previous row. This matches the
-spec's "treat out-of-bounds bytes as 0" rule: with `b = c = 0`, Paeth degenerates
-to Sub and Up degenerates to None.
+Out-of-bounds bytes are treated as 0 ([spec §9.2](https://www.w3.org/TR/png/#9Filter-types)),
+so on the first scanline `b = c = 0`: Up degenerates to None and Paeth to Sub.
+The encoder just starts from a zeroed previous scanline; the decoder
+special-cases an empty previous row.
 
 <details class="impl-ref" open>
 <summary>Implementation reference</summary>
@@ -172,8 +208,3 @@ if previous.is_empty() {
 ```
 
 </details>
-
-> **Tip for the lecture:** rule of thumb: **Sub loves horizontal structure, Up loves
-> vertical structure, Avg loves 2-D smoothness, Paeth loves "whatever is
-> closest" — i.e. most photos — and None loves noise.** The next page shows
-> how the encoder decides, row by row, which one to use.

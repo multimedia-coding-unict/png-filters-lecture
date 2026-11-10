@@ -113,7 +113,10 @@ Things to point out in the lecture:
 ## Heuristic 1 (default): minimum sum of absolute differences
 
 `Adaptive` scores each candidate row with the classic **"minimum sum of absolute
-differences"** heuristic (the same idea libpng uses by default): sum `|b as i8|`
+differences"** heuristic (the same idea libpng uses by default; the spec leaves
+filter selection entirely to the encoder — see
+[§12.7 "Filter selection"](https://www.w3.org/TR/png/#12Filter-selection)):
+sum `|b as i8|`
 over the filtered row — each residual byte reinterpreted as a signed value, its
 magnitude added. Smaller-magnitude residuals → smaller Huffman-coded values →
 smaller file. The cast `(b as i8)` reinterprets `128..=255` as negative, so
