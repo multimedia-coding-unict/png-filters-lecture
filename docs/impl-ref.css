@@ -1,0 +1,16 @@
+/* Styling for the "Implementation reference" fragments used in src/*.md.
+   Registered via `additional-css` in book.toml (path is relative to the book
+   root). Uses mdbook's own theme variables so the box adapts to light/dark. */
+details.impl-ref {
+    border: 1px solid var(--quote-border);
+    border-left: 4px solid var(--links);
+    border-radius: 4px;
+    background: var(--quote-bg);
+    padding: 0.1em 1em 0.4em;
+    margin: 1em 0;
+}
+details.impl-ref > summary {
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0.3em 0;
+}

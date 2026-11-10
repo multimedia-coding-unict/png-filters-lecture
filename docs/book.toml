@@ -12,3 +12,4 @@ build-dir = "book"
 git-repository-url = "https://github.com/image-rs/image-png"
 git-repository-icon = "fa-github"
 edit-url-template = "https://github.com/image-rs/image-png/edit/master/{path}"
+additional-css = ["impl-ref.css"]

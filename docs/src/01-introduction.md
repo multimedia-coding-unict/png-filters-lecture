@@ -31,11 +31,18 @@ IDAT (after inflate) =  [filter byte][filtered row 0]
                        ...
 ```
 
-In this encoder each filtered scanline is written exactly like that — see
-`Writer::zlib_encode_image_data` in `src/encoder.rs` (lines 1017–1018 and
-1060–1063), which does `current[0] = filter_type as u8;` / writes
-`&[filter_type as u8]` before the row bytes, and the streaming variant in
-`StreamWriter::write` (`src/encoder.rs` line 1951 ff.).
+In this encoder each filtered scanline is written exactly like that.
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+`Writer::zlib_encode_image_data` in `src/encoder.rs` (L1017–1018 and L1060–1063
+in this checkout) does `current[0] = filter_type as u8;` / writes
+`&[filter_type as u8]` before the row bytes; the streaming variant is
+`StreamWriter::write` (`src/encoder.rs` L1951 ff. in this checkout). Upstream:
+[`src/encoder.rs`](https://github.com/image-rs/image-png/blob/master/src/encoder.rs).
+
+</details>
 
 ## Why filter at all?
 
@@ -56,17 +63,16 @@ and DEFLATE loves that. Filtering is **lossless**: the decoder adds the
 prediction back (`unfilter`), so pixels round-trip exactly.
 
 > **Note:** filtering is a *preparation* step for compression, not compression itself.
-> The code in `src/filter/mod.rs` says exactly this in its doc comment
-> (lines 8–14): the filter is "a content-aware method of compressing the range
-> of occurring byte values to help the compression algorithm", and it operates
-> on **raw bytes of a scanline, not on pixels**.
 
-Spec reference: [PNG specification, section 9 “Filter algorithms”](https://www.w3.org/TR/png/#9Filters)
-and the classic [libpng book, chapter 9](http://www.libpng.org/pub/png/book/chapter09.html)
-— both are also cited from the source docs in
-[`src/filter/mod.rs`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L14).
+Spec reference: [PNG specification, section 9 “Filter algorithms”](https://www.w3.org/TR/png/#9Filters).
 
-## The cast of characters in this repo
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+The code says exactly this in the doc comment of
+[`src/filter/mod.rs` L8–14](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L8-L14):
+the filter is "a content-aware method of compressing the range of occurring byte
+values to help the compression algorithm".
 
 | Concept | Where it lives |
 | --- | --- |
@@ -76,7 +82,8 @@ and the classic [libpng book, chapter 9](http://www.libpng.org/pub/png/book/chap
 | Adaptive per-row choice | [`adaptive_filter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L498-L526) |
 | Un-filtering (decoder side) | [`unfilter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L100-L357) |
 | Paeth predictor variants | [`src/filter/paeth.rs`](https://github.com/image-rs/image-png/blob/master/src/filter/paeth.rs) |
-| Where the encoder calls the filter | [`src/encoder.rs`](https://github.com/image-rs/image-png/blob/master/src/encoder.rs) — `zlib_encode_image_data` (L906) and `StreamWriter::write` (L1951 in this checkout) |
+| Where the encoder calls the filter | `src/encoder.rs` — `zlib_encode_image_data` (L906) and `StreamWriter::write` (L1951 in this checkout) |
 | Debug output of the per-row choice | `src/encoder.rs` (`set_filter_log` / `filter_log` / `record_filter`, local commits `7bc5cec`, `3fa225c`) + `examples/filter_harness.rs` |
 
-Next page: the five filters themselves, with formulas and worked examples.
+</details>
+

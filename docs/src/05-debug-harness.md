@@ -4,34 +4,46 @@ This repo adds a small debug facility (local commits `7bc5cec` "first harness"
 and `3fa225c` "refined" — not upstream) that records **which filter was chosen
 for every scanline**, plus an example program that visualizes it.
 
-## 1. The encoder-side debug output (`src/encoder.rs`)
+## 1. The encoder-side debug output
+
+Opt in on the `Encoder`, then read the log back from the `Writer` /
+`StreamWriter`. Internally, every place a filter byte is written also records
+it, so the log holds **one spec filter-type byte (0–4) per scanline**, in row
+order for normal images, in Adam7 pass order for interlaced ones.
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
 
 ```rust
 // on Encoder:
-pub fn set_filter_log(&mut self, on: bool);      // L346 — opt in
+pub fn set_filter_log(&mut self, on: bool);      // src/encoder.rs L346 — opt in
 
 // on Writer / StreamWriter:
 pub fn filter_log(&self) -> Option<&[u8]>;       // Writer: L617, StreamWriter: L1650
 ```
 
 Internally: `Options.filter_log: bool` (L170–172) → `Writer::new` creates
-`filter_log: Option<Vec<u8>>` (L598, field L509–511) → every place a filter byte
-is written also calls `record_filter(filter_type)` (L621–625), which pushes
+`filter_log: Option<Vec<u8>>` (L598, field L509–511) → every filter-byte write
+also calls `record_filter(filter_type)` (L621–625), which pushes
 `filter_type as u8`:
 
 - stored (no compression) branch: records `NoFilter` — `src/encoder.rs` L1000
 - fdeflate branch: L1019
 - flate2 branch: L1061
 - streaming `StreamWriter::write`: L1958–1960
+- stored fallback inside the fdeflate branch: L1038–1041 — **not** recorded
+  (the known gap below)
 
-So `filter_log()` returns **one spec filter-type byte (0–4) per scanline**, in
-row order for normal images, in Adam7 pass order for interlaced ones.
+All `src/encoder.rs` line numbers above are from this checkout — local commits
+`7bc5cec` / `3fa225c`, not upstream.
 
-> **Warning — known gap:** in the `FdeflateUltraFast` branch, if the compressed output would
-> be larger than stored, the encoder falls back to writing raw rows with filter
-> byte `0` — but that fallback path (`src/encoder.rs` L1038–1041) does **not**
-> call `record_filter`. In that corner case the log is shorter than the number
-> of scanlines.
+</details>
+
+> **Warning — known gap:** in the `FdeflateUltraFast` branch, if the compressed
+> output would be larger than stored, the encoder falls back to writing raw rows
+> with filter byte `0` — but that fallback path does **not** call
+> `record_filter`. In that corner case the log is shorter than the number of
+> scanlines.
 
 ## 2. The harness: `examples/filter_harness.rs` + `harness/run_harness.sh`
 
@@ -43,13 +55,12 @@ cargo run --release --example filter_harness -- <input.png> [output_dir] [mode]
 # mode: none sub up avg paeth adaptive (default) minentropy   (also: $FILTER_MODE)
 ```
 
-For each input it (see `examples/filter_harness.rs`):
+For each input it:
 
 1. decodes the input (8-bit gray/gray+alpha/RGB/RGBA, non-interlaced preferred),
-2. encodes it once with the chosen mode **and `set_filter_log(true)`**
-   (L130–131), reading back `writer.filter_log()` (L135),
-3. **decodes the result and verifies the round-trip** (L241–249) so the debug
-   map can't lie,
+2. encodes it once with the chosen mode **and the filter log switched on**,
+   reading the log back from the writer,
+3. **decodes the result and verifies the round-trip** so the debug map can't lie,
 4. exports into `<out>/`:
 
 ```text
@@ -62,7 +73,7 @@ For each input it (see `examples/filter_harness.rs`):
     filters.json       [{"row": 0, "filter_id": 4, "filter_name": "paeth"}, ...]
 ```
 
-The color legend (`filter_color`, `examples/filter_harness.rs` L63–72):
+The color legend:
 
 | filter byte | name | color in `filter_map.png` |
 | ---: | --- | --- |
@@ -71,6 +82,16 @@ The color legend (`filter_color`, `examples/filter_harness.rs` L63–72):
 | 2 | up | 🟩 green |
 | 3 | avg | 🟦 blue |
 | 4 | paeth | 🟨 yellow |
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+In `examples/filter_harness.rs` (local commits `7bc5cec` / `3fa225c`): the log
+is switched on at L130–131 and read back at L135, the round-trip is verified at
+L241–249, the color legend (`filter_color`) is at L63–72, and `write_filter_map`
+errors out on interlaced input (L148–155).
+
+</details>
 
 ## 3. Real output from this repo
 
@@ -121,6 +142,5 @@ One entry per scanline — you can `jq` it live, e.g.
 `jq '[.filters[].filter_name] | group_by(.) | map({(.[0]): length}) | add' debug/filters.json`
 to get the distribution table above.
 
-> **Note:** `filter_map.png` requires non-interlaced input (one log entry per row);
-> `write_filter_map` errors out otherwise
-> (`examples/filter_harness.rs` L148–155).
+> **Note:** `filter_map.png` requires non-interlaced input (one log entry per
+> row); `write_filter_map` errors out otherwise.

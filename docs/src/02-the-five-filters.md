@@ -15,41 +15,70 @@ current row:       a   x   ←  x is the byte being filtered
 - `b` = byte **above** `x` (previous scanline, same column)
 - `c` = byte **above-left**
 
-All arithmetic is **modulo 256** (`wrapping_sub` / `wrapping_add` in Rust —
-that's why you see `wrapping_*` everywhere in the code).
+All arithmetic is **modulo 256** (`wrapping_sub` / `wrapping_add` in Rust).
 
 **Important:** the offsets are in *bytes*, not pixels. For RGB (3 bytes/pixel),
 `a` is 3 bytes to the left; this distance is called **bpp** ("bytes per pixel
-in prediction"). See [`BytesPerPixel`](https://github.com/image-rs/image-png/blob/master/src/common.rs#L112-L119)
-and [`Info::bpp_in_prediction`](https://github.com/image-rs/image-png/blob/master/src/common.rs#L831-L833).
-For bit depths < 8, `bpp` is 1 byte — one byte holds several sub-byte pixels,
-which is why the code comments in `src/common.rs` L86–90 and L818–822 warn that
-`bytes_per_pixel` must not be "fixed" for prediction: the PNG spec defines it
-this way.
+in prediction"). For bit depths < 8, `bpp` is 1 byte — one byte holds several
+sub-byte pixels, which is why the spec defines it this way.
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+[`BytesPerPixel`](https://github.com/image-rs/image-png/blob/master/src/common.rs#L112-L119)
+and
+[`Info::bpp_in_prediction`](https://github.com/image-rs/image-png/blob/master/src/common.rs#L831-L833).
+The code comments in `src/common.rs` L86–90 and L818–822 warn that
+`bytes_per_pixel` must not be "fixed" for prediction.
+
+</details>
 
 ## The five filters (spec §9, filter-type bytes 0–4)
 
-| Byte | Name | Residual stored = `x −` ... | Code |
-| ---: | --- | --- | --- |
-| 0 | None | `0` (raw byte) | [`NoFilter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L375-L378) |
-| 1 | Sub | `a` | [`Sub`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L379-L401) |
-| 2 | Up | `b` | [`Up`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L402-L422) |
-| 3 | Avg | `⌊(a + b) / 2⌋` | [`Avg`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L423-L460) |
-| 4 | Paeth | `PaethPredictor(a, b, c)` | [`Paeth`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L461-L494) |
+| Byte | Name | Residual stored = `x −` ... |
+| ---: | --- | --- |
+| 0 | None | `0` (raw byte) |
+| 1 | Sub | `a` |
+| 2 | Up | `b` |
+| 3 | Avg | `⌊(a + b) / 2⌋` |
+| 4 | Paeth | `PaethPredictor(a, b, c)` |
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+The five arms of
+[`filter_internal`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L359-L496):
+
+| Byte | Name | Arm |
+| ---: | --- | --- |
+| 0 | None | [`NoFilter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L375-L378) |
+| 1 | Sub | [`Sub`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L379-L401) |
+| 2 | Up | [`Up`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L402-L422) |
+| 3 | Avg | [`Avg`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L423-L460) |
+| 4 | Paeth | [`Paeth`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L461-L494) |
 
 These five are the internal
 [`RowFilter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L62-L68)
 enum — exactly the values allowed in the per-scanline filter byte
 ([`RowFilter::from_u8`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L77-L86)).
 
+</details>
+
 ### 1. Sub — predict from the left
 
 `residual = x − a`. The first `bpp` bytes of a row have no left neighbour, so
-`a = 0` and they are stored raw (see `output[..bpp].copy_from_slice(...)` at
-[`filter_internal` L399](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L399)).
+`a = 0` and they are stored raw.
 
 **Wins on:** horizontal gradients and smooth colour transitions.
 Example, `bpp = 1`, row `[10, 20, 30, 40]` → Sub residuals `[10, 10, 10, 10]`.
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+`output[..bpp].copy_from_slice(...)` at
+[`filter_internal` L399](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L399).
+
+</details>
 
 ### 2. Up — predict from above
 
@@ -65,8 +94,15 @@ image changes smoothly in *both* directions.
 Nice implementation detail: the encoder doesn't compute `(a + b) / 2` with a
 wider integer. It uses the branchless, overflow-free identity
 `(a & b) + ((a ^ b) >> 1)` — see
-[`filter_internal`, Avg arm L440–442](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L440-L442)
-with the comment linking to [aggregate.org/MAGIC](http://aggregate.org/MAGIC/#Average%20of%20Integers).
+[aggregate.org/MAGIC](http://aggregate.org/MAGIC/#Average%20of%20Integers).
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+[`filter_internal`, Avg arm L440–442](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L440-L442),
+with the comment linking to aggregate.org/MAGIC.
+
+</details>
 
 ### 4. Paeth — predict from the "closest" neighbour
 
@@ -84,12 +120,18 @@ else                   → c        (ties: a, then b — spec-mandated order)
 ```
 
 **Wins on:** most natural photos — edges and textures in arbitrary directions.
-The actual byte-level computation used by the encoder is the optimised
-**FPNGE** variant [`filter_paeth_fpnge`](https://github.com/image-rs/image-png/blob/master/src/filter/paeth.rs#L45-L84)
-(all-unsigned, vectorization-friendly, proposed by Luca Versari). The file
-contains three provably equivalent implementations — there's even an
+The encoder computes it with an optimised **all-unsigned, vectorization-friendly
+variant (FPNGE, proposed by Luca Versari)**.
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+[`filter_paeth_fpnge`](https://github.com/image-rs/image-png/blob/master/src/filter/paeth.rs#L45-L84).
+The file contains three provably equivalent implementations — there's even an
 (exhaustive, `#[ignore]`d) test that checks all 256³ inputs
 ([`paeth.rs` L360–375](https://github.com/image-rs/image-png/blob/master/src/filter/paeth.rs#L360-L375)).
+
+</details>
 
 ### 0. None — no prediction
 
@@ -112,8 +154,14 @@ current row `x = [12, 19, 33, 41]`:
 ## Edge case: the first row
 
 There is no previous row. The encoder simply starts with a **zeroed previous
-row** (`zeroed_prev` in `src/encoder.rs` L963), and the decoder special-cases
-an empty previous row in
+row**, and the decoder special-cases an empty previous row. This matches the
+spec's "treat out-of-bounds bytes as 0" rule: with `b = c = 0`, Paeth degenerates
+to Sub and Up degenerates to None.
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+`zeroed_prev` in `src/encoder.rs` L963 (this checkout), and
 [`unfilter` L108–115](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L108-L115):
 
 ```rust
@@ -123,8 +171,7 @@ if previous.is_empty() {
 }
 ```
 
-which matches the spec's "treat out-of-bounds bytes as 0" rule: with `b = c = 0`,
-Paeth degenerates to Sub and Up degenerates to None.
+</details>
 
 > **Tip for the lecture:** rule of thumb: **Sub loves horizontal structure, Up loves
 > vertical structure, Avg loves 2-D smoothness, Paeth loves "whatever is

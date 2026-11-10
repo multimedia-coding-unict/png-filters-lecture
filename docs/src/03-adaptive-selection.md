@@ -1,8 +1,15 @@
 # Adaptive selection: how this encoder picks a filter per row
 
-## The public API: `Filter`
+## The public API: the `Filter` modes
 
-Users of the crate choose a **mode** through
+Users of the crate choose a **mode** through the encoder's filter setting:
+a fixed filter, or a per-row heuristic. `Adaptive` — pick per row with a
+heuristic — is the default; `MinEntropy` picks per row with an entropy
+heuristic.
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
 [`Encoder::set_filter`](https://github.com/image-rs/image-png/blob/master/src/encoder.rs#L336)
 (and `StreamWriter::set_filter`):
 
@@ -23,14 +30,20 @@ the default is `Adaptive`, L29–33.)
 
 Fixed modes map 1:1 onto the internal
 [`RowFilter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L88-L97)
-(`from_method`). `Adaptive` and `MinEntropy` don't have a single `RowFilter` —
-they decide **per scanline**, and that decision is what gets stored in the
-filter byte.
-
-The convenience [`Compression`](https://github.com/image-rs/image-png/blob/master/src/common.rs#L356-L377)
+(`from_method`). The convenience
+[`Compression`](https://github.com/image-rs/image-png/blob/master/src/common.rs#L356-L377)
 setting also picks a filter for you, via
 [`Filter::from_simple`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L48-L57)
-(called from `Encoder::set_compression`, `src/encoder.rs` L315–318):
+(called from `Encoder::set_compression`, `src/encoder.rs` L315–318 in this
+checkout).
+
+</details>
+
+`Adaptive` and `MinEntropy` don't have a single internal filter type — they
+decide **per scanline**, and that decision is what gets stored in the filter
+byte.
+
+The `Compression` convenience setting picks a filter for you:
 
 | `Compression` | filter chosen | why |
 | --- | --- | --- |
@@ -38,15 +51,19 @@ setting also picks a filter for you, via
 | `Fastest` | `Up` | "pairs well with FdeflateUltraFast" |
 | `Fast` / `Balanced` / `High` | `Adaptive` | best ratio |
 
-## The core loop: `adaptive_filter`
+## The core loop: per-row choice
 
-Both adaptive modes share one function,
-[`adaptive_filter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L498-L526).
-It **tries the four predictive filters on the row and keeps the cheapest**:
+Both adaptive modes share one function: it **tries the four predictive filters
+on the row and keeps the cheapest**.
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+[`adaptive_filter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L498-L526):
 
 ```rust
 fn adaptive_filter(f: impl Fn(&[u8]) -> u64, /* cost function */
-                   bpp, len, previous, current, output) -> RowFilter {
+                    bpp, len, previous, current, output) -> RowFilter {
     let mut min_cost: u64 = u64::MAX;
     let mut filter_choice = RowFilter::NoFilter;
     for &filter in [Up, Sub, Avg, Paeth].iter() {          // trial order
@@ -67,6 +84,17 @@ fn adaptive_filter(f: impl Fn(&[u8]) -> u64, /* cost function */
 }
 ```
 
+The only difference between the two adaptive modes is the **cost function**
+`f`, wired up in
+[`filter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L528-L546):
+
+```rust
+Filter::Adaptive   => adaptive_filter(sum_buffer, ...),
+Filter::MinEntropy => adaptive_filter(entropy, ...),
+```
+
+</details>
+
 Things to point out in the lecture:
 
 - **All four candidates are actually computed** (`filter_internal` writes into
@@ -82,20 +110,19 @@ Things to point out in the lecture:
 - **Early exit at cost 0**: a perfectly predicted row (all-zero residuals,
   e.g. a solid-colour region with Up) short-circuits the loop.
 
-The only difference between the two adaptive modes is the **cost function**
-`f`, wired up in
-[`filter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L528-L546):
+## Heuristic 1 (default): minimum sum of absolute differences
 
-```rust
-Filter::Adaptive   => adaptive_filter(sum_buffer, ...),
-Filter::MinEntropy => adaptive_filter(entropy, ...),
-```
+`Adaptive` scores each candidate row with the classic **"minimum sum of absolute
+differences"** heuristic (the same idea libpng uses by default): sum `|b as i8|`
+over the filtered row — each residual byte reinterpreted as a signed value, its
+magnitude added. Smaller-magnitude residuals → smaller Huffman-coded values →
+smaller file. The cast `(b as i8)` reinterprets `128..=255` as negative, so
+`unsigned_abs()` is correct for all bytes.
 
-## Heuristic 1 (default): minimum sum of absolute differences — `sum_buffer`
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
 
-[`sum_buffer`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L606-L627)
-sums `|b as i8|` over the filtered row — i.e. it treats each residual byte as a
-signed value and adds its magnitude:
+[`sum_buffer`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L606-L627):
 
 ```rust
 fn sum_buffer(buf: &[u8]) -> u64 {
@@ -105,36 +132,43 @@ fn sum_buffer(buf: &[u8]) -> u64 {
 }
 ```
 
-This is the classic **"minimum sum of absolute differences"** heuristic (the
-same idea libpng uses by default): smaller-magnitude residuals → smaller
-Huffman-coded values → smaller file. Note the subtle cast: `(b as i8)` reinterprets
-`128..=255` as negative, so `unsigned_abs()` is correct for all bytes — there's
-a regression test for the `-128` edge case
+There's a regression test for the `-128` edge case
 ([`sum_buffer_test`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L720-L730)).
 The 32-byte chunking exists to help the compiler auto-vectorize (see the
 `CHUNK_SIZE` comment at
 [`filter_internal` L369–372](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L369-L372)).
 
-## Heuristic 2: minimum estimated entropy — `entropy` (the `MinEntropy` mode)
+</details>
 
-[`entropy`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L555-L603)
-estimates *how many bits* the residual row would need, without floating point
-(implementation originally from **oxipng**):
+## Heuristic 2: minimum estimated entropy (`MinEntropy`)
 
-1. Count occurrences of each byte value in a 256-entry histogram
-   (scattered into 4 arrays to reduce contention, L566–574).
-2. **Runs of zeros are free**: an all-zero 8-byte chunk is skipped entirely
-   ("runs of zeros are common and very compressible", L562–565), and an
-   all-zero row short-circuits to cost 0 (L582–584) — same early-exit effect.
+`MinEntropy` estimates *how many bits* the residual row would need, without
+floating point (implementation originally from **oxipng**):
+
+1. Count occurrences of each byte value in a 256-entry histogram.
+2. **Runs of zeros are free**: an all-zero chunk is skipped entirely ("runs of
+   zeros are common and very compressible"), and an all-zero row short-circuits
+   to cost 0 — same early-exit effect.
 3. Estimate `n · H = Σ countᵢ · log2(n / countᵢ)` as `ilog2i(n) − Σ ilog2i(countᵢ)`,
    using the integer approximation
-   [`ilog2i(i) = i·⌊log2 i⌋ + 2·(i − 2^⌊log2 i⌋)`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L548-L553)
-   (L595–600).
+   `ilog2i(i) = i·⌊log2 i⌋ + 2·(i − 2^⌊log2 i⌋)`.
 
 Intuition: entropy directly models what DEFLATE's Huffman stage cares about —
 the *distribution* of residual bytes — rather than just their magnitude. In
 practice `MinEntropy` often wins a few percent over `Adaptive` on photos, at the
 cost of building the histogram per candidate row.
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+[`entropy`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L555-L603):
+histogram scattered into 4 arrays to reduce contention (L566–574), all-zero
+8-byte chunks skipped (L562–565), all-zero row → cost 0 (L582–584), and the
+estimate computed via
+[`ilog2i`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L548-L553)
+(L595–600).
+
+</details>
 
 ## What this means in one picture
 

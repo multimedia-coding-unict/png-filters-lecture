@@ -41,12 +41,9 @@ Open `results/<image>/debug/filter_map.png` in an image viewer next to
 3. **Why is `none` sometimes the best single choice?** (Noise / already
    compressed data: filtering can *inflate* residuals — every residual is a
    byte, and prediction errors add up mod 256.)
-4. **Why does the adaptive loop skip `NoFilter`?** (Look at
-   `adaptive_filter`: the candidate list is `[Up, Sub, Avg, Paeth]`. If all
-   residuals are bad, a heuristic can't see that raw bytes would have been
-   better.)
-5. **Why ties going to Paeth?** (`cost <= min_cost` with Paeth last — deliberate
-   bias; flip it and measure.)
+4. **Why does the adaptive loop skip `NoFilter`?** (If all residuals are bad,
+   a heuristic can't see that raw bytes would have been better.)
+5. **Why ties going to Paeth?** (A deliberate bias — flip it and measure.)
 6. **What does the filter byte cost?** 1 byte per scanline: for a 512-row image
    that's 512 bytes, ~0.1% of a 500 KB file — negligible. For a 10 000-row
    1-pixel-wide image it's 10 KB — relevant! (Width-1 images: every row is 1
@@ -55,17 +52,35 @@ Open `results/<image>/debug/filter_map.png` in an image viewer next to
    `results/kodim23/encoded.png` (e.g. `python3 -c "import zlib,sys; ..."`) and
    look at the first byte of each row — it should match `filters.json`.
 
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+- The adaptive candidate list `[Up, Sub, Avg, Paeth]` (`NoFilter` is not tried)
+  and the `cost <= min_cost` tie-break:
+  [`adaptive_filter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L498-L526).
+
+</details>
+
 ## Going further
 
-- Patch `adaptive_filter` (`src/filter/mod.rs` L498–526) to also try
-  `NoFilter`, or to change the tie-break to `<`, rebuild the harness, and
-  re-run demo 4. The debug log makes the effect visible immediately.
-- Try `Filter::MinEntropy` on text vs. photos: the histogram cost models
-  Huffman better, so it usually wins where byte *distribution* matters more
-  than byte *magnitude*.
-- Interlaced encoding resets prediction per Adam7 pass
-  (`src/encoder.rs` L973, L1013, L1056) — the filter log then has one entry per
-  pass scanline, in pass order (`Writer::filter_log` docs, L610–616).
+- Make the adaptive loop also try `NoFilter`, or flip the tie-break to `<` —
+  rebuild the harness and re-run demo 4. The debug log makes the effect visible
+  immediately.
+- Try `MinEntropy` on text vs. photos: the histogram cost models Huffman better,
+  so it usually wins where byte *distribution* matters more than byte *magnitude*.
+- Interlaced encoding resets prediction per Adam7 pass — the filter log then has
+  one entry per pass scanline, in pass order.
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+- Patch target: [`adaptive_filter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L498-L526)
+  (`src/filter/mod.rs`).
+- Adam7 prediction reset: `src/encoder.rs` L973, L1013, L1056 in this checkout;
+  per-pass filter log documented on `Writer::filter_log`, L610–616 — **local
+  commits `7bc5cec` / `3fa225c`, not upstream**.
+
+</details>
 
 ## Build & serve these notes
 
