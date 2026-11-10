@@ -1,0 +1,14 @@
+[book]
+title = "Predictive Filters in PNG — a lecture with image-png"
+description = "How PNG scanline prediction filters work, and how the image-png encoder implements and chooses them."
+authors = ["image-png contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/image-rs/image-png"
+git-repository-icon = "fa-github"
+edit-url-template = "https://github.com/image-rs/image-png/edit/master/{path}"
