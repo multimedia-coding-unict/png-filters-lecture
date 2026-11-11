@@ -3,8 +3,8 @@
 ## The public API: the `Filter` modes
 
 Users of the crate choose a **mode** through the encoder's filter setting:
-a fixed filter, or a per-row heuristic. `Adaptive` — pick per row with a
-heuristic — is the default; `MinEntropy` picks per row with an entropy
+a fixed filter, or a per-row heuristic. `Adaptive` - pick per row with a
+heuristic - is the default; `MinEntropy` picks per row with an entropy
 heuristic.
 
 <details class="impl-ref" open>
@@ -39,7 +39,7 @@ checkout).
 
 </details>
 
-`Adaptive` and `MinEntropy` don't have a single internal filter type — they
+`Adaptive` and `MinEntropy` don't have a single internal filter type - they
 decide **per scanline**, and that decision is what gets stored in the filter
 byte.
 
@@ -98,12 +98,12 @@ Filter::MinEntropy => adaptive_filter(entropy, ...),
 Things to point out in the lecture:
 
 - **All four candidates are actually computed** (`filter_internal` writes into
-  `output`), then scored. This is "try everything, keep the best" — simple and
+  `output`), then scored. This is "try everything, keep the best" - simple and
   robust, at the cost of ~4× the filtering work per row.
 - **Trial order is `Up, Sub, Avg, Paeth` and ties go to the *later* candidate**
   because of `cost <= min_cost`. So on a tie, Paeth beats Avg beats Sub beats
-  Up — a deliberate bias towards Paeth, which is best on typical photos.
-- **`NoFilter` is never tried** by the adaptive modes — the loop starts at `Up`.
+  Up - a deliberate bias towards Paeth, which is best on typical photos.
+- **`NoFilter` is never tried** by the adaptive modes - the loop starts at `Up`.
 - If the winner isn't Paeth, its output has been overwritten by the later
   trials, so it's recomputed once at the end (the `if filter_choice != Paeth`
   branch). Paeth is last, so its result is still sitting in `output`.
@@ -114,13 +114,13 @@ Things to point out in the lecture:
 
 `Adaptive` scores each candidate row with the classic **"minimum sum of absolute
 differences"** heuristic (the same idea libpng uses by default; the spec leaves
-filter selection entirely to the encoder — see
+filter selection entirely to the encoder - see
 [§12.7 "Filter selection"](https://www.w3.org/TR/png/#12Filter-selection)):
 sum `|b as i8|`
-over the filtered row — each residual byte reinterpreted as a signed value, its
+over the filtered row - each residual byte reinterpreted as a signed value, its
 magnitude added. Small-magnitude residuals tend to form the concentrated
-distribution DEFLATE likes, so a lower score is a good proxy for a smaller file
-— but only a proxy; the compressor has the final word. The cast `(b as i8)`
+distribution DEFLATE likes, so a lower score is a good proxy for a smaller file,
+but only a proxy; the compressor has the final word. The cast `(b as i8)`
 reinterprets `128..=255` as negative, so `unsigned_abs()` is correct for all
 bytes.
 
@@ -153,13 +153,13 @@ floating point (implementation originally from **oxipng**):
 1. Count occurrences of each byte value in a 256-entry histogram.
 2. **Runs of zeros are free**: an all-zero chunk is skipped entirely ("runs of
    zeros are common and very compressible"), and an all-zero row short-circuits
-   to cost 0 — same early-exit effect.
+   to cost 0 - same early-exit effect.
 3. Estimate `n · H = Σ countᵢ · log2(n / countᵢ)` as `ilog2i(n) − Σ ilog2i(countᵢ)`,
    using the integer approximation
    `ilog2i(i) = i·⌊log2 i⌋ + 2·(i − 2^⌊log2 i⌋)`.
 
-Intuition: entropy directly models what DEFLATE's Huffman stage cares about —
-the *distribution* of residual bytes — rather than just their magnitude. In
+Intuition: entropy directly models what DEFLATE's Huffman stage cares about -
+the *distribution* of residual bytes - rather than just their magnitude. In
 the harness measurements on four kodim photos, `MinEntropy` came out slightly
 smaller than `Adaptive` on three of them and slightly larger on one, while
 its filter path measured several times slower, because it builds the histogram
@@ -188,5 +188,5 @@ for each scanline:
     write filter byte = chosen RowFilter as u8, then the residuals
 ```
 
-Next page: a filter mode that exists only in this repo — `GreedyAdaptive`,
+Next page: a filter mode that exists only in this repo - `GreedyAdaptive`,
 which reuses the previous row's filter when its residuals are already small.

@@ -89,6 +89,9 @@ preparing a **lecture about them**. Two things are in progress:
 
 ## Conventions when editing the docs
 
+- No em-dashes (U+2014) in the docs. Write `docs/src/*.md` and
+  `docs/book.toml` with ASCII punctuation only (`-`, `:`, `,`, parentheses).
+  `docs/book/` is generated output, so never hand-edit it.
 - Cite code with links to
   `https://github.com/image-rs/image-png/blob/master/<path>#L<n>` for upstream
   files; for the local-only debug additions (commits `7bc5cec`/`3fa225c`) cite

@@ -7,7 +7,7 @@ in local commit `4d6b45d` ("feat: greedy adaptive mode") in this checkout.
 ## Why: `Adaptive` pays for four predictions per row
 
 The previous page showed that `Adaptive` runs `filter_internal` on all of
-`[Up, Sub, Avg, Paeth]` for **every** scanline and keeps the cheapest — about
+`[Up, Sub, Avg, Paeth]` for **every** scanline and keeps the cheapest - about
 4× the filter work of a fixed filter. On the 768×512 kodim photos the filter
 path measured ~0.5–0.6% of the whole encode (DEFLATE dominates); on a small
 128×128 icon it measured ~2.3% (results below).
@@ -50,16 +50,16 @@ same setter.
 <details class="impl-ref" open>
 <summary>Implementation reference</summary>
 
-All of the greedy code is local commit `4d6b45d`, not upstream — the paths and
+All of the greedy code is local commit `4d6b45d`, not upstream - the paths and
 line numbers below are repo-relative, from this checkout:
 
-- `Filter::GreedyAdaptive` variant — `src/filter/mod.rs` L24–36 (variant at L35)
-- `DEFAULT_GREEDY_THRESHOLD = 2.0` — `src/filter/mod.rs` L109–115; re-exported
+- `Filter::GreedyAdaptive` variant - `src/filter/mod.rs` L24–36 (variant at L35)
+- `DEFAULT_GREEDY_THRESHOLD = 2.0` - `src/filter/mod.rs` L109–115; re-exported
   in `src/lib.rs` L91
-- `Encoder::set_filter_threshold` — `src/encoder.rs` L363–376 (clamped at
+- `Encoder::set_filter_threshold` - `src/encoder.rs` L363–376 (clamped at
   L375); option field `filter_threshold` L170, default at L187;
-  `StreamWriter::set_filter_threshold` — L1778–1783
-- harness wiring: mode `"greedy"` and `--threshold T[,T...]` —
+  `StreamWriter::set_filter_threshold` - L1778–1783
+- harness wiring: mode `"greedy"` and `--threshold T[,T...]` -
   `examples/filter_harness.rs` L81, L204, L413–418 (a sweep runs the
   thresholds 2/4/8/16 and names the rows `greedy@<t>`)
 
@@ -71,7 +71,7 @@ The per-row entry point `filter` takes a mutable state
 (`src/filter/mod.rs` L641–673, local commit): after choosing, it stores
 `state.previous = Some(chosen)` (L671). `FilterState` (L117–144) holds just
 the previous row's `RowFilter` and the threshold, and `reset()` forgets the
-previous choice — called exactly where prediction itself resets: at each
+previous choice - called exactly where prediction itself resets: at each
 Adam7 pass in `Writer::zlib_encode_image_data` (`src/encoder.rs` L1086, L1141)
 and at each new frame in `StreamWriter::start_frame` (L2028). The first row
 of a pass or frame therefore behaves exactly like `Adaptive`.
@@ -81,7 +81,7 @@ of a pass or frame therefore behaves exactly like `Adaptive`.
 <details class="impl-ref" open>
 <summary>Implementation reference</summary>
 
-`greedy_adaptive_filter` — `src/filter/mod.rs` L601–639 (local commit
+`greedy_adaptive_filter` - `src/filter/mod.rs` L601–639 (local commit
 `4d6b45d`):
 
 ```rust
@@ -99,7 +99,7 @@ if let Some(filter) = previous_filter {
 adaptive_filter(f, bpp, len, previous, current, output)   // first row: plain Adaptive
 ```
 
-The cost function is `sum_buffer` (MSAD) — the same heuristic as `Adaptive`,
+The cost function is `sum_buffer` (MSAD) - the same heuristic as `Adaptive`,
 not entropy (dispatch at `src/filter/mod.rs` L652–664).
 
 `adaptive_filter_seeded` (L559–599) is the upstream
@@ -117,7 +117,7 @@ step now checks which filter's output is actually sitting in the buffer
 Things to point out in the lecture:
 
 - On a row where the previous filter's mean residual is at or below the
-  threshold, greedy evaluates **one** candidate instead of four — that is
+  threshold, greedy evaluates **one** candidate instead of four - that is
   where the saved time comes from.
 - The fallback is still the full adaptive search, so a bad reuse is always
   corrected: greedy can differ from `Adaptive` only when the previous filter
@@ -154,8 +154,8 @@ the minimum of 5 runs, read from `results/kodim*/times.json` (gitignored).
 | kodim23 | 0.490 | 0.422 | 0.260 | 0.228 | 0.224 |
 
 And on a small image, where the filter path is a visible share of the encode
-— the 128×128 RGBA icon
-`tests/benches/tango-icon-address-book-new-128-rsvg-convert.png`:
+(the 128×128 RGBA icon
+`tests/benches/tango-icon-address-book-new-128-rsvg-convert.png`):
 
 | mode | encoded bytes | filter ms | filter % of encode |
 | --- | ---: | ---: | ---: |
@@ -170,7 +170,7 @@ What the measurements show:
 - At threshold 8, filter-prediction time dropped ~48–60% on the photos, with
   encoded sizes ranging from −0.05% to +2.44% relative to `adaptive` depending
   on the image.
-- greedy@8 came out *smaller* than `adaptive` on kodim07 and kodim17 — the
+- greedy@8 came out *smaller* than `adaptive` on kodim07 and kodim17 - the
   MSAD argmin is only a proxy for the compressed size.
 - On these photos the filter path stayed below ~0.7% of the whole encode for
   both modes, so the absolute whole-encode difference was small there; on the
@@ -178,7 +178,7 @@ What the measurements show:
   greedy@2).
 
 > **Note:** the size numbers above are whole-file bytes, not the heuristic
-> cost — the heuristic only guided the choice; DEFLATE had the final word.
+> cost - the heuristic only guided the choice; DEFLATE had the final word.
 
 ## Tests
 
@@ -187,13 +187,13 @@ What the measurements show:
 
 `src/filter/mod.rs`, bottom of the file (local commit `4d6b45d`):
 
-- `greedy_adaptive_reuses_previous_filter_below_threshold` L863–885 —
+- `greedy_adaptive_reuses_previous_filter_below_threshold` L863–885 -
   identical rows, threshold 0, previous `Up` → `Up` kept, output all zeros;
-- `greedy_adaptive_keeps_previous_filter_with_high_threshold` L887–906 —
+- `greedy_adaptive_keeps_previous_filter_with_high_threshold` L887–906 -
   threshold infinity keeps the previous filter unconditionally;
-- `greedy_adaptive_falls_back_to_adaptive` L908–939 — threshold 0 with a bad
+- `greedy_adaptive_falls_back_to_adaptive` L908–939 - threshold 0 with a bad
   previous filter → same choice *and* same output as `Filter::Adaptive`;
-- `seeded_adaptive_matches_unseeded` L941–972 — the seeded search returns the
+- `seeded_adaptive_matches_unseeded` L941–972 - the seeded search returns the
   same filter and output as plain `adaptive_filter` for all four seeds.
 
 </details>

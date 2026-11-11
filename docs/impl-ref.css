@@ -1,6 +1,8 @@
-/* Styling for the "Implementation reference" fragments used in src/*.md.
+/* Styling for the "Implementation reference" fragments and the collapsed
+   "aside" spoilers used in src/*.md.
    Registered via `additional-css` in book.toml (path is relative to the book
-   root). Uses mdbook's own theme variables so the box adapts to light/dark. */
+   root). The impl-ref box uses mdbook's own theme variables so it adapts to
+   light/dark; the aside uses a translucent orange for the same reason. */
 details.impl-ref {
     border: 1px solid var(--quote-border);
     border-left: 4px solid var(--links);
@@ -10,6 +12,22 @@ details.impl-ref {
     margin: 1em 0;
 }
 details.impl-ref > summary {
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0.3em 0;
+}
+
+/* Collapsed aside spoiler (e.g. the Paeth gradient intuition in
+   src/02-the-five-filters.md): orange-tinted box, translucent so it works
+   on both the light and the dark theme. */
+details.aside {
+    border: 1px solid rgba(255, 140, 0, 0.65);
+    border-radius: 4px;
+    background: rgba(255, 165, 0, 0.22);
+    padding: 0.1em 1em 0.4em;
+    margin: 1em 0;
+}
+details.aside > summary {
     font-weight: 600;
     cursor: pointer;
     padding: 0.3em 0;

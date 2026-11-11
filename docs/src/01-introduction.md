@@ -20,7 +20,7 @@ purposes the interesting ones are:
 The pixel data inside `IDAT` is **not** raw pixels. Before compression, every
 scanline is:
 
-1. **filtered** — a reversible prediction step, and
+1. **filtered** - a reversible prediction step, and
 2. prefixed with **one filter-type byte** (values `0..=4`) that tells the
    decoder which filter was used for that row.
 
@@ -49,8 +49,8 @@ in this checkout) does `current[0] = filter_type as u8;` / writes
 DEFLATE (the zlib layer) compresses *bytes*, and it is good at squeezing
 **repetition and concentrated distributions**: Huffman codes are short for
 frequent symbols, and repeated byte sequences get compact encodings. Natural
-images are full of neighbouring bytes that are similar but not identical — a
-blue sky row might be `[135, 206, 235, 136, 207, 236, ...]` — and those
+images are full of neighbouring bytes that are similar but not identical - a
+blue sky row might be `[135, 206, 235, 136, 207, 236, ...]` - and those
 compress poorly on their own.
 
 A predictive filter replaces each byte `x` with a **residual**:
@@ -60,7 +60,7 @@ residual = x − predictor(neighbouring bytes)
 ```
 
 If the predictor is good, the residuals form a concentrated, repetitive
-distribution — small numbers clustered around 0 — which is exactly what
+distribution - small numbers clustered around 0 - which is exactly what
 DEFLATE compresses well. Filtering is **lossless**: the decoder adds the
 prediction back (`unfilter`), so pixels round-trip exactly.
 
@@ -84,7 +84,7 @@ values to help the compression algorithm".
 | Adaptive per-row choice | [`adaptive_filter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L498-L526) |
 | Un-filtering (decoder side) | [`unfilter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L100-L357) |
 | Paeth predictor variants | [`src/filter/paeth.rs`](https://github.com/image-rs/image-png/blob/master/src/filter/paeth.rs) |
-| Where the encoder calls the filter | `src/encoder.rs` — `zlib_encode_image_data` (L906) and `StreamWriter::write` (L1951 in this checkout) |
+| Where the encoder calls the filter | `src/encoder.rs` - `zlib_encode_image_data` (L906) and `StreamWriter::write` (L1951 in this checkout) |
 | Debug output of the per-row choice | `src/encoder.rs` (`set_filter_log` / `filter_log` / `record_filter`, local commits `7bc5cec`, `3fa225c`) + `examples/filter_harness.rs` |
 
 </details>
