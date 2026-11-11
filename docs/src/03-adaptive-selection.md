@@ -45,10 +45,10 @@ byte.
 
 The `Compression` convenience setting picks a filter for you:
 
-| `Compression` | filter chosen | why |
+| `Compression` | filter chosen | Rationale |
 | --- | --- | --- |
-| `NoCompression` | `NoFilter` | "with no DEFLATE, filtering would only waste time" |
-| `Fastest` | `Up` | "pairs well with FdeflateUltraFast" |
+| `NoCompression` | `NoFilter` | without DEFLATE, filtering only adds work |
+| `Fastest` | `Up` | a good match for FdeflateUltraFast |
 | `Fast` / `Balanced` / `High` | `Adaptive` | best ratio |
 
 ## The core loop: per-row choice
@@ -95,7 +95,7 @@ Filter::MinEntropy => adaptive_filter(entropy, ...),
 
 </details>
 
-Things to point out in the lecture:
+The logic of the algorithm can be summarized as:
 
 - **All four candidates are actually computed** (`filter_internal` writes into
   `output`), then scored. This is "try everything, keep the best" - simple and
@@ -113,37 +113,10 @@ Things to point out in the lecture:
 ## Heuristic 1 (default): minimum sum of absolute differences
 
 `Adaptive` scores each candidate row with the classic **"minimum sum of absolute
-differences"** heuristic (the same idea libpng uses by default; the spec leaves
-filter selection entirely to the encoder - see
-[§12.7 "Filter selection"](https://www.w3.org/TR/png/#12Filter-selection)):
-sum `|b as i8|`
+differences"** heuristic: sum `|b as i8|`
 over the filtered row - each residual byte reinterpreted as a signed value, its
 magnitude added. Small-magnitude residuals tend to form the concentrated
-distribution DEFLATE likes, so a lower score is a good proxy for a smaller file,
-but only a proxy; the compressor has the final word. The cast `(b as i8)`
-reinterprets `128..=255` as negative, so `unsigned_abs()` is correct for all
-bytes.
-
-<details class="impl-ref" open>
-<summary>Implementation reference</summary>
-
-[`sum_buffer`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L606-L627):
-
-```rust
-fn sum_buffer(buf: &[u8]) -> u64 {
-    // per 32-byte chunk:
-    acc += u64::from((b as i8).unsigned_abs());
-    ...
-}
-```
-
-There's a regression test for the `-128` edge case
-([`sum_buffer_test`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L720-L730)).
-The 32-byte chunking exists to help the compiler auto-vectorize (see the
-`CHUNK_SIZE` comment at
-[`filter_internal` L369–372](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L369-L372)).
-
-</details>
+distribution DEFLATE likes, so a lower score is a good proxy for a smaller file. 
 
 ## Heuristic 2: minimum estimated entropy (`MinEntropy`)
 
@@ -151,42 +124,85 @@ The 32-byte chunking exists to help the compiler auto-vectorize (see the
 floating point (implementation originally from **oxipng**):
 
 1. Count occurrences of each byte value in a 256-entry histogram.
-2. **Runs of zeros are free**: an all-zero chunk is skipped entirely ("runs of
-   zeros are common and very compressible"), and an all-zero row short-circuits
+2. **Runs of zeros are free**: an all-zero chunk is skipped entirely, and an all-zero row short-circuits
    to cost 0 - same early-exit effect.
 3. Estimate `n · H = Σ countᵢ · log2(n / countᵢ)` as `ilog2i(n) − Σ ilog2i(countᵢ)`,
    using the integer approximation
    `ilog2i(i) = i·⌊log2 i⌋ + 2·(i − 2^⌊log2 i⌋)`.
 
 Intuition: entropy directly models what DEFLATE's Huffman stage cares about -
-the *distribution* of residual bytes - rather than just their magnitude. In
-the harness measurements on four kodim photos, `MinEntropy` came out slightly
-smaller than `Adaptive` on three of them and slightly larger on one, while
-its filter path measured several times slower, because it builds the histogram
-per candidate row.
+the *distribution* of residual bytes - rather than just their magnitude. 
 
 <details class="impl-ref" open>
 <summary>Implementation reference</summary>
 
-[`entropy`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L555-L603):
-histogram scattered into 4 arrays to reduce contention (L566–574), all-zero
-8-byte chunks skipped (L562–565), all-zero row → cost 0 (L582–584), and the
-estimate computed via
+First the integer log helper,
 [`ilog2i`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L548-L553)
-(L595–600).
+(this computes `i * log2(i)`, so that `ilog2i(n) - sum ilog2i(count)` approximates
+`n * H`):
 
-</details>
-
-## What this means in one picture
-
-```text
-for each scanline:
-    for f in [Up, Sub, Avg, Paeth]:        # NoFilter not considered
-        residuals = filter_internal(f, row)
-        cost[f]   = sum_buffer(residuals)  # or entropy(residuals) for MinEntropy
-    choose argmin cost[f]   (ties → later in [Up, Sub, Avg, Paeth], i.e. Paeth bias)
-    write filter byte = chosen RowFilter as u8, then the residuals
+```rust
+/// Estimate the value of i * log2(i) without using floating point operations,
+/// implementation originally from oxipng.
+fn ilog2i(i: u32) -> u32 {
+    let log = 32 - i.leading_zeros() - 1;
+    i * log + ((i - (1 << log)) << 1)
+}
 ```
 
-Next page: a filter mode that exists only in this repo - `GreedyAdaptive`,
-which reuses the previous row's filter when its residuals are already small.
+Then the cost function itself,
+[`entropy`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L555-L603):
+histogram scattered into 4 arrays to reduce contention (L566–574), all-zero
+8-byte chunks skipped (L562–565), all-zero row short-circuits to cost 0
+(L582–584), and the estimate computed via `ilog2i` (L595–600):
+
+```rust
+fn entropy(buf: &[u8]) -> u64 {
+    let mut counts = [[0_u32; 256]; 4];
+    let mut total = 0;
+
+    // Count the number of occurrences of each byte value.
+    let mut chunks = buf.chunks_exact(8);
+    for chunk in &mut chunks {
+        // Runs of zeros are common and very compressible, so treat them as free.
+        if chunk == [0; 8] {
+            continue;
+        }
+
+        // Scatter the counts into 4 separate arrays to reduce contention.
+        for j in 0..2 {
+            counts[0][chunk[j * 4] as usize] += 1;
+            counts[1][chunk[1 + j * 4] as usize] += 1;
+            counts[2][chunk[2 + j * 4] as usize] += 1;
+            counts[3][chunk[3 + j * 4] as usize] += 1;
+        }
+        total += 8;
+    }
+    for &lit in chunks.remainder() {
+        counts[0][lit as usize] += 1;
+        total += 1;
+    }
+
+    // If the input is entirely zeros, short-circuit the entropy calculation.
+    if counts[0][0] == total {
+        return 0;
+    }
+
+    // Consolidate the counts.
+    for i in 0..256 {
+        counts[0][i] += counts[1][i] + counts[2][i] + counts[3][i];
+    }
+
+    // Compute the entropy: ilog2i(n) - sum of ilog2i(count) over non-zero counts.
+    let mut entropy = ilog2i(total);
+    for &count in &counts[0] {
+        if count > 0 {
+            entropy = entropy.saturating_sub(ilog2i(count));
+        }
+    }
+
+    entropy as u64
+}
+```
+
+</details>
