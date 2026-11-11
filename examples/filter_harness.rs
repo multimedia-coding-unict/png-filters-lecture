@@ -45,14 +45,19 @@
 //! scanline's filter when its cost is at or below `--threshold` (a mean
 //! absolute residual per byte). `--threshold` accepts a comma-separated list,
 //! so the greedy mode can be swept over several thresholds in one run; in a
-//! sweep the greedy rows are named `greedy@<threshold>`. Inputs must be 8-bit
-//! PNGs (gray, gray+alpha, RGB or RGBA); non-interlaced input works best since
-//! the filter map is one row per scanline. Unsupported images in a folder are
-//! reported and skipped.
+//! sweep the greedy rows are named `greedy@<threshold>`, and a full sweep
+//! sweeps greedy over [`SWEEP_GREEDY_THRESHOLDS`] by default. Inputs must be
+//! 8-bit PNGs (gray, gray+alpha, RGB or RGBA); non-interlaced input works best
+//! since the filter map is one row per scanline. Unsupported images in a
+//! folder are reported and skipped.
 //!
-//! A sweep prints one table per image and, after all images, a cumulative table
-//! that sums the encoded bytes and times over the images and averages
-//! bits/pixel, so the whole input set can be compared mode by mode.
+//! A sweep prints one table per image and, after all images, a cumulative
+//! table that sums the encoded bytes and times over the images and averages
+//! bits/pixel, so the whole input set can be compared mode by mode. In every
+//! numeric table column the percentage difference from the best mode is
+//! reported in parentheses (the best mode itself is marked). A sweep also ends
+//! with a per-image greedy-vs-`adaptive` gain summary, sorted from the largest
+//! gain to the largest loss, using the best greedy threshold per image.
 
 use std::{
     env, fs,
@@ -77,6 +82,9 @@ const MODES: &[(&str, Filter)] = &[
 ];
 
 const DEFAULT_MODE: &str = "adaptive";
+
+/// Greedy thresholds swept by a full sweep unless `--threshold` overrides them.
+const SWEEP_GREEDY_THRESHOLDS: &[f64] = &[2.0, 4.0, 8.0, 16.0];
 
 /// One concrete encoding configuration: a filter mode plus the threshold used
 /// by [`Filter::GreedyAdaptive`] (ignored by the other modes).
@@ -291,8 +299,10 @@ struct Args {
     inputs: Vec<PathBuf>,
     out_dir: PathBuf,
     selection: Selection,
-    /// Thresholds used by the greedy mode; more than one value sweeps them.
-    thresholds: Vec<f64>,
+    /// Thresholds used by the greedy mode; `None` means the built-in default
+    /// ([`DEFAULT_GREEDY_THRESHOLD`], or a full sweep's
+    /// [`SWEEP_GREEDY_THRESHOLDS`]).
+    thresholds: Option<Vec<f64>>,
     repeat: u32,
 }
 
@@ -302,7 +312,8 @@ fn usage() -> String {
          INPUT may be a PNG file or a directory (searched recursively for *.png)\n\
          modes: {} (default: {DEFAULT_MODE}), sweep\n\
          --out DIR: base output directory (default: results)\n\
-         --threshold T[,T...]: greedy threshold(s), mean residual per byte (default: {DEFAULT_GREEDY_THRESHOLD})\n\
+         --threshold T[,T...]: greedy threshold(s), mean residual per byte\n\
+             (default: {DEFAULT_GREEDY_THRESHOLD}; a sweep sweeps 2, 4, 8, 16)\n\
          --repeat N: encode each mode N times and report the minimum (default: 1)",
         MODES.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
     )
@@ -332,7 +343,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut repeat = 1u32;
     let mut out_dir = PathBuf::from("results");
     let mut selection = parse_selection(DEFAULT_MODE).unwrap();
-    let mut thresholds = vec![DEFAULT_GREEDY_THRESHOLD];
+    let mut thresholds: Option<Vec<f64>> = None;
     let mut inputs = Vec::new();
 
     let mut i = 0;
@@ -368,7 +379,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 let value = args
                     .get(i + 1)
                     .ok_or_else(|| format!("--threshold needs a value\n{}", usage()))?;
-                thresholds = parse_thresholds(value)?;
+                thresholds = Some(parse_thresholds(value)?);
                 i += 2;
             }
             arg if arg.starts_with('-') => {
@@ -664,55 +675,134 @@ fn min_duration(values: impl Iterator<Item = Duration>) -> Duration {
     values.min().unwrap_or_default()
 }
 
+/// Percentage difference from a column's reference value, formatted as a
+/// parenthetical; the reference row itself is marked instead of showing a
+/// zero difference.
+fn pct_from_reference(value: f64, reference: f64, is_reference_row: bool) -> String {
+    if is_reference_row {
+        " (ref)".to_string()
+    } else if reference == 0.0 {
+        String::new()
+    } else {
+        format!(" ({:+.1}%)", (value - reference) / reference * 100.0)
+    }
+}
+
+/// Share of the filter prediction path in the whole encode, in percent.
+fn filter_percent(result: &ModeResult) -> f64 {
+    let total = min_duration(result.runs.iter().map(|run| run.encode_total));
+    let filter = min_duration(result.runs.iter().map(|run| run.filter_prediction));
+    if total.is_zero() {
+        0.0
+    } else {
+        filter.as_secs_f64() / total.as_secs_f64() * 100.0
+    }
+}
+
 fn print_table(results: &[ModeResult]) {
     println!();
     println!(
-        "{:<12} {:>12} {:>10} {:>12} {:>12} {:>9}",
-        "mode", "bytes", "bits/px", "encode ms", "filter ms", "filter %"
+        "parenthesized: % difference from adaptive (the column best if adaptive is absent)"
     );
+    // Every cell is a fixed-width, right-aligned numeric field (digits line up
+    // across rows) followed by a fixed-width, left-aligned parenthetical.
+    println!(
+        "{:<12} {:>12}{:<12} {:>7}{:<12} {:>9}{:<12} {:>9}{:<12} {:>8}{:<12}",
+        "mode", "bytes", "", "bits/px", "", "enc ms", "", "filt ms", "", "filter %", ""
+    );
+
+    // The percentages refer to `adaptive`, the encoder's default; when it is
+    // not among the results (e.g. a greedy-threshold-only sweep) they refer to
+    // the best (lowest) value in each column instead.
+    let adaptive = results.iter().find(|r| r.mode == "adaptive");
+    let (ref_bytes, ref_bits, ref_total, ref_filter, ref_percent) = match adaptive {
+        Some(a) => (
+            a.encoded_bytes as f64,
+            a.bits_per_pixel,
+            min_duration(a.runs.iter().map(|run| run.encode_total)).as_secs_f64(),
+            min_duration(a.runs.iter().map(|run| run.filter_prediction)).as_secs_f64(),
+            filter_percent(a),
+        ),
+        None => (
+            results.iter().map(|r| r.encoded_bytes).min().unwrap_or(0) as f64,
+            results
+                .iter()
+                .map(|r| r.bits_per_pixel)
+                .fold(f64::INFINITY, f64::min),
+            results
+                .iter()
+                .map(|r| min_duration(r.runs.iter().map(|run| run.encode_total)).as_secs_f64())
+                .fold(f64::INFINITY, f64::min),
+            results
+                .iter()
+                .map(|r| min_duration(r.runs.iter().map(|run| run.filter_prediction)).as_secs_f64())
+                .fold(f64::INFINITY, f64::min),
+            results.iter().map(filter_percent).fold(f64::INFINITY, f64::min),
+        ),
+    };
+    let is_reference_row = |r: &ModeResult| adaptive.is_some_and(|a| a.mode == r.mode);
+
     for result in results {
         let total_min = min_duration(result.runs.iter().map(|run| run.encode_total));
         let filter_min = min_duration(result.runs.iter().map(|run| run.filter_prediction));
-        let percent = if total_min.is_zero() {
-            0.0
-        } else {
-            filter_min.as_secs_f64() / total_min.as_secs_f64() * 100.0
-        };
+        let percent = filter_percent(result);
+        let reference_row = is_reference_row(result);
         println!(
-            "{:<12} {:>12} {:>10.2} {:>12.3} {:>12.3} {:>8.1}%",
+            "{:<12} {:>12}{:<12} {:>7.2}{:<12} {:>9.3}{:<12} {:>9.3}{:<12} {:>8.1}%{:<12}",
             result.mode,
             result.encoded_bytes,
+            pct_from_reference(result.encoded_bytes as f64, ref_bytes, reference_row),
             result.bits_per_pixel,
+            pct_from_reference(result.bits_per_pixel, ref_bits, reference_row),
             total_min.as_secs_f64() * 1e3,
+            pct_from_reference(total_min.as_secs_f64(), ref_total, reference_row),
             filter_min.as_secs_f64() * 1e3,
-            percent
+            pct_from_reference(filter_min.as_secs_f64(), ref_filter, reference_row),
+            percent,
+            pct_from_reference(percent, ref_percent, reference_row),
         );
     }
 }
 
+/// One aggregated row of [`print_cumulative_table`].
+struct CumulativeRow {
+    mode: String,
+    bytes: u64,
+    bits_per_pixel: f64,
+    total: Duration,
+    filter: Duration,
+}
+
 /// One table for the whole input set: bytes and times are summed over the
-/// images, bits/pixel is the mean of the per-image values.
-fn print_cumulative_table(per_image: &[Vec<ModeResult>]) {
+/// images, bits/pixel is the mean of the per-image values. Each numeric column
+/// carries the percentage difference from the best mode in parentheses.
+fn print_cumulative_table(per_image: &[(String, Vec<ModeResult>)]) {
     let images = per_image.len();
     println!();
     println!("=== cumulative over {images} image(s) ===");
     println!(
-        "{:<12} {:>14} {:>12} {:>14} {:>14} {:>9}",
-        "mode", "total bytes", "avg bits/px", "total enc ms", "total filt ms", "filter %"
+        "parenthesized: % difference from adaptive (the column best if adaptive is absent)"
+    );
+    // Same cell layout as `print_table`: fixed-width numeric field, then the
+    // parenthetical in its own fixed-width field, so digits stay aligned.
+    println!(
+        "{:<12} {:>12}{:<12} {:>7}{:<12} {:>9}{:<12} {:>9}{:<12} {:>8}{:<12}",
+        "mode", "total bytes", "", "bits/px", "", "enc ms", "", "filt ms", "", "filter %", ""
     );
 
     let Some(first) = per_image.first() else {
         return;
     };
-    for (index, first_mode) in first.iter().enumerate() {
+    let mut rows: Vec<CumulativeRow> = Vec::new();
+    for (mode_index, first_mode) in first.1.iter().enumerate() {
         let mut bytes = 0u64;
         let mut bits_per_pixel = 0.0;
         let mut total = Duration::ZERO;
         let mut filter = Duration::ZERO;
         let mut count = 0usize;
 
-        for image in per_image {
-            let Some(result) = image.get(index) else {
+        for (_, results) in per_image {
+            let Some(result) = results.get(mode_index) else {
                 continue;
             };
             // Modes are always run in the same order; guard against a mismatch
@@ -725,22 +815,123 @@ fn print_cumulative_table(per_image: &[Vec<ModeResult>]) {
             count += 1;
         }
 
-        if count == 0 {
-            continue;
+        if count > 0 {
+            rows.push(CumulativeRow {
+                mode: first_mode.mode.clone(),
+                bytes,
+                bits_per_pixel: bits_per_pixel / count as f64,
+                total,
+                filter,
+            });
         }
-        let percent = if total.is_zero() {
+    }
+
+    // The percentages refer to `adaptive` (see `print_table`).
+    let percent_of = |row: &CumulativeRow| {
+        if row.total.is_zero() {
             0.0
         } else {
-            filter.as_secs_f64() / total.as_secs_f64() * 100.0
-        };
+            row.filter.as_secs_f64() / row.total.as_secs_f64() * 100.0
+        }
+    };
+    let adaptive = rows.iter().find(|r| r.mode == "adaptive");
+    let (ref_bytes, ref_bits, ref_total, ref_filter, ref_percent) = match adaptive {
+        Some(a) => (
+            a.bytes as f64,
+            a.bits_per_pixel,
+            a.total.as_secs_f64(),
+            a.filter.as_secs_f64(),
+            percent_of(a),
+        ),
+        None => (
+            rows.iter().map(|r| r.bytes).min().unwrap_or(0) as f64,
+            rows.iter().map(|r| r.bits_per_pixel).fold(f64::INFINITY, f64::min),
+            rows.iter().map(|r| r.total.as_secs_f64()).fold(f64::INFINITY, f64::min),
+            rows.iter().map(|r| r.filter.as_secs_f64()).fold(f64::INFINITY, f64::min),
+            rows.iter().map(&percent_of).fold(f64::INFINITY, f64::min),
+        ),
+    };
+    let is_reference_row = |r: &CumulativeRow| adaptive.is_some_and(|a| a.mode == r.mode);
+
+    for row in &rows {
+        let percent = percent_of(row);
+        let reference_row = is_reference_row(row);
         println!(
-            "{:<12} {:>14} {:>12.2} {:>14.3} {:>14.3} {:>8.1}%",
-            first_mode.mode,
-            bytes,
-            bits_per_pixel / count as f64,
-            total.as_secs_f64() * 1e3,
-            filter.as_secs_f64() * 1e3,
-            percent
+            "{:<12} {:>12}{:<12} {:>7.2}{:<12} {:>9.3}{:<12} {:>9.3}{:<12} {:>8.1}%{:<12}",
+            row.mode,
+            row.bytes,
+            pct_from_reference(row.bytes as f64, ref_bytes, reference_row),
+            row.bits_per_pixel,
+            pct_from_reference(row.bits_per_pixel, ref_bits, reference_row),
+            row.total.as_secs_f64() * 1e3,
+            pct_from_reference(row.total.as_secs_f64(), ref_total, reference_row),
+            row.filter.as_secs_f64() * 1e3,
+            pct_from_reference(row.filter.as_secs_f64(), ref_filter, reference_row),
+            percent,
+            pct_from_reference(percent, ref_percent, reference_row),
+        );
+    }
+}
+
+/// Per-image summary of the greedy mode against `adaptive`, sorted from the
+/// largest gain (smaller encoded bytes) to the largest loss. For each image the
+/// best greedy threshold is used; gains are relative to `adaptive`.
+fn print_greedy_summary(per_image: &[(String, Vec<ModeResult>)]) {
+    let Some((_, first)) = per_image.first() else {
+        return;
+    };
+    let Some(adaptive_index) = first.iter().position(|r| r.mode == "adaptive") else {
+        return;
+    };
+    let greedy_indices: Vec<usize> = first
+        .iter()
+        .enumerate()
+        .filter(|(_, result)| result.mode.starts_with("greedy@"))
+        .map(|(index, _)| index)
+        .collect();
+    if greedy_indices.is_empty() {
+        return;
+    }
+
+    // (image, best greedy mode, adaptive bytes, greedy bytes, gain %)
+    let mut rows: Vec<(String, String, u64, u64, f64)> = Vec::new();
+    for (name, results) in per_image {
+        let adaptive = &results[adaptive_index];
+        let mut best: Option<(usize, f64)> = None;
+        for &index in &greedy_indices {
+            let gain = (adaptive.encoded_bytes as f64 - results[index].encoded_bytes as f64)
+                / adaptive.encoded_bytes as f64
+                * 100.0;
+            if best.map_or(true, |(_, best_gain)| gain > best_gain) {
+                best = Some((index, gain));
+            }
+        }
+        if let Some((index, gain)) = best {
+            rows.push((
+                name.clone(),
+                results[index].mode.clone(),
+                adaptive.encoded_bytes,
+                results[index].encoded_bytes,
+                gain,
+            ));
+        }
+    }
+
+    rows.sort_by(|a, b| b.4.total_cmp(&a.4));
+
+    println!();
+    println!(
+        "=== greedy vs adaptive, best threshold per image, sorted from the largest gain to the largest loss ==="
+    );
+    println!(
+        "{:<40} {:>12} {:>12} {:>10} {:>10} {:>10}",
+        "image", "adaptive B", "greedy B", "mode", "saved B", "gain %"
+    );
+    for (name, mode, adaptive_bytes, greedy_bytes, gain) in &rows {
+        let saved = *adaptive_bytes as i64 - *greedy_bytes as i64;
+        println!(
+            "{:<40.40} {:>12} {:>12} {:>10} {:>+10} {:>+9.2}%",
+            name, adaptive_bytes, greedy_bytes, mode, saved, gain
         );
     }
 }
@@ -877,12 +1068,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&args.out_dir)?;
     let out_abs = fs::canonicalize(&args.out_dir)?;
 
-    let configs = mode_configs(args.selection, &args.thresholds);
+    let thresholds = match args.selection {
+        Selection::Sweep => args
+            .thresholds
+            .unwrap_or_else(|| SWEEP_GREEDY_THRESHOLDS.to_vec()),
+        _ => args
+            .thresholds
+            .unwrap_or_else(|| vec![DEFAULT_GREEDY_THRESHOLD]),
+    };
+    let configs = mode_configs(args.selection, &thresholds);
     let sweep = configs.len() > 1;
 
     let mut jobs = Vec::new();
     let mut failures = 0usize;
-    let mut per_image: Vec<Vec<ModeResult>> = Vec::new();
+    let mut per_image: Vec<(String, Vec<ModeResult>)> = Vec::new();
 
     for input in &args.inputs {
         match expand_input(input, &out_abs) {
@@ -896,7 +1095,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     for (input, out_dir) in &jobs {
         match run_image(input, out_dir, &configs, args.repeat) {
-            Ok(results) => per_image.push(results),
+            Ok(results) => per_image.push((input.display().to_string(), results)),
             Err(err) => {
                 eprintln!("error: {}: {err}", input.display());
                 failures += 1;
@@ -906,6 +1105,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if sweep && !per_image.is_empty() {
         print_cumulative_table(&per_image);
+        print_greedy_summary(&per_image);
     }
 
     if failures != 0 {

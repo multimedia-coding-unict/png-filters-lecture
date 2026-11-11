@@ -42,7 +42,11 @@ preparing a **lecture about them**. Two things are in progress:
      `Encoder::set_filter_threshold`), that filter is kept; otherwise it falls
      back to the full adaptive search, reusing the already computed cost.
      `--threshold` accepts a comma-separated list, so a sweep can compare
-     several thresholds (rows/folders are named `greedy@<threshold>`).
+     several thresholds (rows/folders are named `greedy@<threshold>`). A
+     `sweep` runs greedy at 2/4/8/16 by default; the sweep tables report each
+     numeric column's percentage difference from `adaptive` in parentheses
+     (marked `(ref)`), and a sweep ends with a per-image greedy-vs-`adaptive`
+     gain summary sorted from the largest gain to the largest loss.
    - Known gap: the `FdeflateUltraFast` stored-fallback path
      (`src/encoder.rs` L1080–1083) writes filter byte 0 without logging it.
 

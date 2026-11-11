@@ -57,10 +57,10 @@ All `src/encoder.rs` line numbers above are from this checkout — local commits
 
 ```bash
 # from the repo root:
-harness/run_harness.sh [--out DIR] [--mode MODE | --sweep] [--repeat N] INPUT [INPUT...]
+harness/run_harness.sh [--out DIR] [--mode MODE | --sweep] [--threshold T[,T...]] [--repeat N] INPUT [INPUT...]
 # or directly (the example accepts the same inputs):
 cargo run --release --example filter_harness -- \
-    [--out DIR] [--mode MODE] [--repeat N] INPUT [INPUT...]
+    [--out DIR] [--mode MODE] [--threshold T[,T...]] [--repeat N] INPUT [INPUT...]
 # mode: none sub up avg paeth adaptive (default) minentropy sweep   (also: $FILTER_MODE)
 
 # several images at once, the four kodim photos:
@@ -79,6 +79,18 @@ produces the whole comparison. `--repeat N` encodes each mode N times and
 reports the minimum, which smooths out timing noise. After all images, a sweep
 prints one **cumulative table** for the whole input set: encoded bytes and times
 are summed over the images, bits/pixel is the mean of the per-image values.
+
+In both the per-image and the cumulative table, every numeric column carries
+the **percentage difference from `adaptive`** in parentheses (the `adaptive`
+row itself is marked `(ref)`); when `adaptive` is not among the runs (e.g. a
+greedy-threshold-only sweep) the difference is from the best mode in that
+column instead.
+
+A full sweep runs `greedy` at thresholds **2, 4, 8 and 16** by default
+(`--threshold T[,T...]` overrides), and ends with a **greedy vs. `adaptive`
+gain summary** sorted per image from the largest gain to the largest loss
+(smaller encoded bytes = positive gain), using the best greedy threshold for
+each image.
 
 For each image and mode it:
 

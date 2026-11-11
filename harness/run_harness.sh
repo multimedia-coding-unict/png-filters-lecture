@@ -35,8 +35,8 @@
 # sweep. Can also be set through the FILTER_MODE environment variable.
 # --threshold T[,T...] sets the greedy threshold (mean residual per byte) and
 # accepts a comma-separated list to sweep several values; in a sweep the greedy
-# rows are named greedy@<threshold>. Can also be set through the
-# FILTER_THRESHOLD environment variable.
+# rows are named greedy@<threshold> and default to 2, 4, 8 and 16. Can also be
+# set through the FILTER_THRESHOLD environment variable.
 # --repeat N encodes each mode N times and reports the minimum (default: 1);
 # can also be set through the FILTER_REPEAT environment variable.
 
