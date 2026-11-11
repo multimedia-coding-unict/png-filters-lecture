@@ -184,5 +184,5 @@ for each scanline:
     write filter byte = chosen RowFilter as u8, then the residuals
 ```
 
-Next page: where all of this lives in the encoder, and how to *see* these
-decisions thanks to the debug outputs added in this repo.
+Next page: a filter mode that exists only in this repo — `GreedyAdaptive`,
+which reuses the previous row's filter when its residuals are already small.

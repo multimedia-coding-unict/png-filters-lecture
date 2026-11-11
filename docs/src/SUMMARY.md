@@ -3,6 +3,4 @@
 - [Introduction: where filtering sits in a PNG](01-introduction.md)
 - [The five PNG scanline filters](02-the-five-filters.md)
 - [Adaptive selection: how this encoder picks a filter per row](03-adaptive-selection.md)
-- [Implementation tour of `image-png`](04-implementation.md)
-- [Seeing the choices: the debug filter harness](05-debug-harness.md)
-- [Lecture experiments and discussion](06-experiments.md)
+- [Greedy-adaptive: a custom filter mode that reuses the previous row's choice](04-greedy-adaptive.md)
