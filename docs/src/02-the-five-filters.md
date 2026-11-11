@@ -1,38 +1,40 @@
 # The five PNG scanline filters
 
-Examples use **8-bit grayscale** (`bpp = 1`). PNG filters bytes, not whole
-pixels or separate channel planes. RGB8 is interleaved `RGBRGB...`, so its left
-neighbour is **three bytes back** (`bpp = 3`). One filter choice covers the
-**entire scanline**, including all channels.
+> **Convention for the rest of these notes:** the PNG spec describes filtering
+> on the 2-D pixel grid, but most of the logic is per scanline. From this page
+> on we therefore talk about **one scanline holding the values of a single
+> color channel** — a one-dimensional sequence of bytes `x = [x0, x1, …, xn-1]`.
+> In a multi-channel image the bytes of all channels are interleaved in the
+> same scanline, and **one filter choice is shared by the whole scanline** —
+> the examples below just abstract the channels away.
+> When a filter needs the row above, "the previous scanline" just means the
+> byte sequence at the same indices; the subdivision into scanlines is
+> implicit in all examples below.
+>
+> The authoritative description is the spec — [§7.2 "Scanlines"](https://www.w3.org/TR/png/#7Scanline),
+> [§9 "Filtering"](https://www.w3.org/TR/png/#9Filters): the 2-D neighbourhood
+> (bytes `a`, `b`, `c`), the exact filter-type definitions and the edge
+> behaviour are defined there and not repeated here.
 
-For the byte `x`, the predictor can use original bytes `a`, `b`, `c`:
+Each byte `x[i]` of the scanline is stored as a residual `x[i] − predictor`,
+where only the residual subtraction (and the decoder's addition of the
+prediction) wraps mod 256 (`wrapping_sub` / `wrapping_add` in Rust); the
+predictor itself is computed exactly, without overflow. The predictor uses up
+to three already-reconstructed bytes:
+`a` to the left, `b` above, `c` above-left. Offsets are in **bytes**, not
+pixels: `a` is `bpp` bytes to the left, where `bpp` is the spec's "bytes per
+pixel in prediction" (1 byte for bit depths < 8).
 
-```text
-                  i-bpp     i
-previous row:  +-----+---+-----+
-               |  c  |...|  b  |
-               +-----+---+-----+
-current row:   |  a  |...|  x  |
-               +-----+---+-----+
-```
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
 
-The decoder has already reconstructed these neighbours when it reaches `x`.
-For packed bit depths below 8, `bpp = 1`; for 16-bit samples, filtering still
-operates on individual bytes, comparing corresponding high or low bytes.
+[`BytesPerPixel`](https://github.com/image-rs/image-png/blob/master/src/common.rs#L112-L119)
+and
+[`Info::bpp_in_prediction`](https://github.com/image-rs/image-png/blob/master/src/common.rs#L831-L833).
+The code comments in `src/common.rs` L86–90 and L818–822 warn that
+`bytes_per_pixel` must not be "fixed" for prediction.
 
-## Wrapping does not lose information
-
-Only the residual subtraction and reconstruction addition wrap modulo 256.
-Predictor calculations must preserve their exact mathematical result:
-Average must not overflow `a + b`, and Paeth's estimate must not wrap.
-
-```text
-x = 10, prediction = 20
-stored residual:  (10 - 20) mod 256 = 246
-reconstructed x: (246 + 20) mod 256 = 10
-```
-
-Here `246` represents a difference of `-10`, not a large prediction error.
+</details>
 
 ## The five filters (spec §9.2, filter-type bytes 0–4)
 
@@ -46,22 +48,38 @@ Here `246` represents a difference of `-10`, not a large prediction error.
 
 Full definitions: [spec §9.2 "Filter types for filter method 0"](https://www.w3.org/TR/png/#9Filter-types).
 
-All five produce the same number of row bytes. What changes is how well those
-bytes compress. In the examples, `res` is the stored residual row (in bold).
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
 
-### 0. None — no prediction
+The five arms of
+[`filter_internal`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L359-L496):
 
-Store `x` unchanged. The specification usually recommends None for
-indexed-colour images and packed bit depths below 8: predicting palette
-indices or packed samples often does not help.
+| Byte | Name | Arm |
+| ---: | --- | --- |
+| 0 | None | [`NoFilter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L375-L378) |
+| 1 | Sub | [`Sub`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L379-L401) |
+| 2 | Up | [`Up`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L402-L422) |
+| 3 | Avg | [`Avg`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L423-L460) |
+| 4 | Paeth | [`Paeth`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L461-L494) |
+
+These five are the internal
+[`RowFilter`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L62-L68)
+enum — exactly the values allowed in the per-scanline filter byte
+([`RowFilter::from_u8`](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L77-L86)).
+
+</details>
+
+All per-filter examples below use one channel (`bpp = 1`) and the same
+schematic: `previous` = the scanline above, `x` = scanline being filtered,
+`prediction` = per-byte predictor, `res` = stored residuals (in bold).
 
 ### 1. Sub — predict from the left
 
 `residual = x − a`. The first `bpp` bytes of the scanline have no left
 neighbour, so `a = 0` and they are stored raw.
 
-**Often effective on:** horizontal gradients and smooth colour transitions
-(`previous` is never read):
+**Wins on:** horizontal gradients and smooth colour transitions (`previous` is
+never read):
 
 <pre>
 previous   = [ 7,  7,  7,  7]
@@ -73,7 +91,7 @@ res        = <b>[10, 10, 10, 10]</b>
 ### 2. Up — predict from above
 
 `residual = x − b`, with `b = previous[i]` the byte at the same index of the
-previous scanline. **Often effective on:** repeated rows and flat regions:
+previous scanline. **Wins on:** vertical repetition and flat regions:
 
 <pre>
 previous   = [ 8, 20, 28, 36]
@@ -83,7 +101,7 @@ res        = <b>[ 2,  0,  2,  4]</b>
 </pre>
 
 With `previous = x` the residuals would be all `0`, which DEFLATE compresses
-very efficiently—not to zero bytes.
+perfectly.
 
 ### 3. Avg — predict from the mean of left and above
 
@@ -99,13 +117,23 @@ res        = <b>[ 6,  5,  6,  7]</b>
 
 (e.g. at `i = 1`: `a = 10`, `b = 20`, so `20 − ⌊(10 + 20) / 2⌋ = 5`.)
 
-For larger inputs, the same rule applies: averaging `200` and `200` gives
-`200`, not an overflowing byte sum divided by two.
+Nice implementation detail: the encoder doesn't compute `(a + b) / 2` with a
+wider integer. It uses the branchless, overflow-free identity
+`(a & b) + ((a ^ b) >> 1)` — see
+[aggregate.org/MAGIC](http://aggregate.org/MAGIC/#Average%20of%20Integers).
+
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+[`filter_internal`, Avg arm L440–442](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L440-L442),
+with the comment linking to aggregate.org/MAGIC.
+
+</details>
 
 ### 4. Paeth — predict from the "closest" neighbour
 
 Paeth picks whichever of `a`, `b`, `c` is closest to the linear estimate
-`p = a + b − c`, breaking ties in the order `a`, then `b`, then `c`
+`p = a + b − c`, breaking ties in the order `a`, then `b`
 ([spec §9.4](https://www.w3.org/TR/png/#9Filter-type-4-Paeth)):
 
 <pre>
@@ -115,27 +143,65 @@ prediction = [10, 10, 20, 30]
 res        = <b>[ 0, 10, 10, 10]</b>
 </pre>
 
+Byte by byte (`p = a + b − c`; ties resolve in the order `a`, `b`, `c`):
+
+<pre>
+i=0: a= 0, b=10, c= 0  p=10  ->  picks <b>b=10</b>  res = 10-10 = <b> 0</b>
+i=1: a=10, b=10, c=10  p=10  ->  picks <b>a=10</b>  res = 20-10 = <b>10</b>
+i=2: a=20, b=10, c=10  p=20  ->  picks <b>a=20</b>  res = 30-20 = <b>10</b>
+i=3: a=30, b=10, c=10  p=30  ->  picks <b>a=30</b>  res = 40-30 = <b>10</b>
+</pre>
+
 At `i = 0` the edges make `a = c = 0`, so Paeth picks `b = 10`. From `i = 1` on
 `b = c = 10`, hence `p = a` and Paeth picks `a` — the same residuals as Sub
-**after the first byte**. Sub would give `[10, 10, 10, 10]`.
+here (Up on the same input would give `[0, 10, 20, 30]`).
 
-Paeth can also pick the diagonal neighbour:
+**Wins on:** most natural photos — edges and textures in arbitrary directions.
+The encoder computes it with an optimised **all-unsigned, vectorization-friendly
+variant**.
 
-```text
-a = 100, b = 120, c = 110
-p = 100 + 120 - 110 = 110
-distances to p: a = 10, b = 10, c = 0  ->  pick c
-```
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
 
-**Often effective on:** natural images, where the useful prediction direction
-can change from byte to byte. It is not guaranteed to beat the simpler filters.
+[`filter_paeth_fpnge`](https://github.com/image-rs/image-png/blob/master/src/filter/paeth.rs#L45-L84).
+The file contains three provably equivalent implementations — there's even an
+(exhaustive, `#[ignore]`d) test that checks all 256³ inputs
+([`paeth.rs` L360–375](https://github.com/image-rs/image-png/blob/master/src/filter/paeth.rs#L360-L375)).
+
+</details>
+
+### 0. None — no prediction
+
+Store `x` raw (`previous` is ignored):
+
+<pre>
+previous   = [ 8, 20, 28, 36]
+x          = [10, 20, 30, 40]
+prediction = [ 0,  0,  0,  0]
+res        = <b>[10, 20, 30, 40]</b>
+</pre>
+
+Sometimes a *predictive* filter produces residuals larger than the original
+bytes (e.g. noisy data), and None is the honest choice.
 
 ## Edge behaviour
 
 Out-of-bounds bytes are treated as 0 ([spec §9.2](https://www.w3.org/TR/png/#9Filter-types)),
 so on the first scanline `b = c = 0`: Up degenerates to None and Paeth to Sub.
-For the first `bpp` bytes of every row, `a = c = 0`. These rules also apply
-independently to each Adam7 pass.
+The encoder just starts from a zeroed previous scanline; the decoder
+special-cases an empty previous row.
 
-Implementation optimisations and source links are in the
-[appendix](05-reference.md#filter-implementation-details).
+<details class="impl-ref" open>
+<summary>Implementation reference</summary>
+
+`zeroed_prev` in `src/encoder.rs` L963 (this checkout), and
+[`unfilter` L108–115](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L108-L115):
+
+```rust
+if previous.is_empty() {
+    if filter == Paeth { filter = Sub; }
+    else if filter == Up { filter = NoFilter; }
+}
+```
+
+</details>
