@@ -19,6 +19,9 @@ mod simd;
 /// filter chosen for the previous row and only tries the remaining filters when
 /// that filter's cost is above a threshold (see
 /// [`Encoder::set_filter_threshold`](crate::Encoder::set_filter_threshold)).
+/// In that fallback search the previous filter stays the incumbent and the
+/// search exits as soon as a checked candidate is selected over it, replacing
+/// `Adaptive`'s early exit at cost 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Filter {
@@ -29,8 +32,9 @@ pub enum Filter {
     Paeth,
     Adaptive,
     MinEntropy,
-    /// Reuses the previous row's filter when its cost is low enough, otherwise
-    /// falls back to [`Filter::Adaptive`]. See
+    /// Reuses the previous row's filter when its cost is low enough; otherwise
+    /// searches with that filter as the incumbent, exiting early at the first
+    /// candidate at least as cheap. See
     /// [`Encoder::set_filter_threshold`](crate::Encoder::set_filter_threshold).
     GreedyAdaptive,
 }
@@ -553,9 +557,16 @@ fn adaptive_filter(
 }
 
 /// The shared adaptive search. `initial` may carry a filter whose output is
-/// already in `output` together with its cost, so it does not have to be
-/// recomputed. The iteration order and tie-breaking are unchanged, which means
-/// a seeded search returns the same filter as an unseeded one.
+/// already in `output` together with its cost.
+///
+/// Without a seed this is the plain adaptive search: trial order
+/// `[Up, Sub, Avg, Paeth]`, `<=` tie-break, early exit at cost 0.
+///
+/// With a seed (used by [`greedy_adaptive_filter`]) the seed becomes the
+/// incumbent: its cost starts as `min_cost`, it is not re-evaluated inside
+/// the loop, and the search exits early as soon as a checked candidate is
+/// selected over it (`cost <= min_cost`). That selection-based early exit
+/// replaces the cost 0 early exit of the unseeded search.
 fn adaptive_filter_seeded(
     f: impl Fn(&[u8]) -> u64,
     bpp: usize,
@@ -567,26 +578,30 @@ fn adaptive_filter_seeded(
 ) -> RowFilter {
     use RowFilter::*;
 
-    let mut min_cost: u64 = u64::MAX;
-    let mut filter_choice = RowFilter::NoFilter;
+    let seed = initial.map(|(filter, _)| filter);
+    // A seeded search starts from the seed as the incumbent: its filtered row
+    // is already in `output` and its cost is already known.
+    let mut min_cost: u64 = initial.map_or(u64::MAX, |(_, cost)| cost);
+    let mut filter_choice = initial.map_or(RowFilter::NoFilter, |(filter, _)| filter);
     // Which filter's result is currently in `output`, if any.
     let mut output_filter = initial.map(|(filter, _)| filter);
 
     for &filter in [Up, Sub, Avg, Paeth].iter() {
-        let cost = match initial {
-            Some((initial_filter, initial_cost)) if initial_filter == filter => initial_cost,
-            _ => {
-                filter_internal(filter, bpp, len, previous, current, output);
-                output_filter = Some(filter);
-                f(output)
-            }
-        };
+        if Some(filter) == seed {
+            // The seed is the incumbent; its cost does not have to be recomputed.
+            continue;
+        }
+        filter_internal(filter, bpp, len, previous, current, output);
+        output_filter = Some(filter);
+        let cost = f(output);
 
         if cost <= min_cost {
             min_cost = cost;
             filter_choice = filter;
 
-            if cost == 0 {
+            // A seeded search exits as soon as the checked candidate is
+            // selected; an unseeded one only exits early at cost 0.
+            if seed.is_some() || cost == 0 {
                 break;
             }
         }
@@ -601,8 +616,11 @@ fn adaptive_filter_seeded(
 /// Like [`adaptive_filter`], but first tries the filter chosen for the previous
 /// scanline. If that filter's cost is at or below `threshold` (a mean per
 /// byte), it is kept without evaluating the other filters. Otherwise this falls
-/// back to the full adaptive search, so the first row and any row that fails
-/// the threshold behave exactly like [`Filter::Adaptive`].
+/// back to a search seeded with that filter (see [`adaptive_filter_seeded`]):
+/// the previously checked filter stays the incumbent and the search exits
+/// early as soon as another candidate is selected over it, replacing the
+/// cost 0 early exit of the plain adaptive search. The first row (no previous
+/// filter) behaves exactly like [`Filter::Adaptive`].
 #[allow(clippy::too_many_arguments)]
 fn greedy_adaptive_filter(
     f: impl Fn(&[u8]) -> u64,
@@ -906,10 +924,11 @@ mod test {
     }
 
     #[test]
-    fn greedy_adaptive_falls_back_to_adaptive() {
-        const LEN: usize = 240;
+    fn greedy_adaptive_fallback_exits_at_first_selected_candidate() {
+        const LEN: usize = 8;
         let previous = vec![0; LEN];
-        let current: Vec<u8> = (0..LEN).map(|i| (i * 7) as u8).collect();
+        let current: Vec<u8> = (0..LEN).map(|i| (i * 10) as u8).collect();
+        // MSAD costs at bpp 1: Up 280, Sub 70, Avg 175, Paeth 70.
 
         let mut greedy_output = vec![0; LEN];
         let mut state = FilterState::new(0.0);
@@ -921,6 +940,46 @@ mod test {
             &current,
             &mut greedy_output,
             &mut state,
+        );
+
+        // Up (cost 280) fails the threshold, so the fallback search starts
+        // from it as the incumbent; Sub (cost 70) is the first checked
+        // candidate at or below that cost, so the search exits right there.
+        assert_eq!(greedy, RowFilter::Sub);
+        assert_eq!(greedy_output, [0, 10, 10, 10, 10, 10, 10, 10]);
+        assert_eq!(state.previous, Some(RowFilter::Sub));
+
+        // The plain adaptive search evaluates all four candidates and lets
+        // the later Paeth win the tie with Sub, so the greedy fallback can
+        // now differ from `Filter::Adaptive` as well.
+        let mut adaptive_output = vec![0; LEN];
+        let mut adaptive_state = FilterState::new(0.0);
+        let adaptive = filter(
+            Filter::Adaptive,
+            BytesPerPixel::One,
+            &previous,
+            &current,
+            &mut adaptive_output,
+            &mut adaptive_state,
+        );
+        assert_eq!(adaptive, RowFilter::Paeth);
+    }
+
+    #[test]
+    fn greedy_adaptive_first_row_matches_adaptive() {
+        const LEN: usize = 240;
+        let previous: Vec<u8> = (0..LEN).map(|i| (i * 13 + 7) as u8).collect();
+        let current: Vec<u8> = (0..LEN).map(|i| (i * 29 + 3) as u8).collect();
+
+        let mut greedy_output = vec![0; LEN];
+        let mut greedy_state = FilterState::new(DEFAULT_GREEDY_THRESHOLD);
+        let greedy = filter(
+            Filter::GreedyAdaptive,
+            BytesPerPixel::One,
+            &previous,
+            &current,
+            &mut greedy_output,
+            &mut greedy_state,
         );
 
         let mut adaptive_output = vec![0; LEN];
@@ -939,36 +998,130 @@ mod test {
     }
 
     #[test]
-    fn seeded_adaptive_matches_unseeded() {
-        const LEN: usize = 240;
-        let previous: Vec<u8> = (0..LEN).map(|i| (i * 13 + 7) as u8).collect();
-        let current: Vec<u8> = (0..LEN).map(|i| (i * 29 + 3) as u8).collect();
+    fn seeded_adaptive_exits_early_on_selection() {
+        use core::cell::Cell;
 
-        for initial in [
+        const LEN: usize = 8;
+        let previous = vec![0; LEN];
+        let current: Vec<u8> = (0..LEN).map(|i| (i * 10) as u8).collect();
+        // MSAD costs at bpp 1: Up 280, Sub 70, Avg 175, Paeth 70.
+
+        let calls = Cell::new(0);
+        let counting = |buf: &[u8]| {
+            calls.set(calls.get() + 1);
+            sum_buffer(buf)
+        };
+
+        // Seeded with Up: Sub is the first candidate at or below the seed's
+        // cost, so the loop stops after a single evaluation.
+        let mut seeded_output = vec![0; LEN];
+        filter_internal(
             RowFilter::Up,
-            RowFilter::Sub,
-            RowFilter::Avg,
+            1,
+            LEN,
+            &previous,
+            &current,
+            &mut seeded_output,
+        );
+        let seed_cost = sum_buffer(&seeded_output);
+        let seeded = adaptive_filter_seeded(
+            &counting,
+            1,
+            LEN,
+            &previous,
+            &current,
+            &mut seeded_output,
+            Some((RowFilter::Up, seed_cost)),
+        );
+        assert_eq!(seeded, RowFilter::Sub);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(seeded_output, [0, 10, 10, 10, 10, 10, 10, 10]);
+
+        // Seeded with Paeth (cost 70): Up is worse, Sub ties and is selected,
+        // so the search stops before Avg.
+        calls.set(0);
+        let mut seeded_output = vec![0; LEN];
+        filter_internal(
             RowFilter::Paeth,
-        ] {
-            let mut seeded_output = vec![0; LEN];
-            filter_internal(initial, 1, LEN, &previous, &current, &mut seeded_output);
-            let cost = sum_buffer(&seeded_output);
-            let seeded = adaptive_filter_seeded(
-                sum_buffer,
-                1,
-                LEN,
-                &previous,
-                &current,
-                &mut seeded_output,
-                Some((initial, cost)),
-            );
+            1,
+            LEN,
+            &previous,
+            &current,
+            &mut seeded_output,
+        );
+        let seed_cost = sum_buffer(&seeded_output);
+        let seeded = adaptive_filter_seeded(
+            &counting,
+            1,
+            LEN,
+            &previous,
+            &current,
+            &mut seeded_output,
+            Some((RowFilter::Paeth, seed_cost)),
+        );
+        assert_eq!(seeded, RowFilter::Sub);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(seeded_output, [0, 10, 10, 10, 10, 10, 10, 10]);
 
-            let mut plain_output = vec![0; LEN];
-            let plain = adaptive_filter(sum_buffer, 1, LEN, &previous, &current, &mut plain_output);
+        // Seeded with the strictly cheapest filter (Sub, cost 70 on a row
+        // where Paeth costs 71): no candidate is selected, the seed wins and
+        // its row is recomputed into `output`.
+        let previous = vec![1; LEN];
+        calls.set(0);
+        let mut seeded_output = vec![0; LEN];
+        filter_internal(
+            RowFilter::Sub,
+            1,
+            LEN,
+            &previous,
+            &current,
+            &mut seeded_output,
+        );
+        let seed_cost = sum_buffer(&seeded_output);
+        let seeded = adaptive_filter_seeded(
+            &counting,
+            1,
+            LEN,
+            &previous,
+            &current,
+            &mut seeded_output,
+            Some((RowFilter::Sub, seed_cost)),
+        );
+        assert_eq!(seeded, RowFilter::Sub);
+        assert_eq!(calls.get(), 3);
+        assert_eq!(seeded_output, [0, 10, 10, 10, 10, 10, 10, 10]);
 
-            assert_eq!(seeded, plain);
-            assert_eq!(seeded_output, plain_output);
-        }
+        // Unseeded: all four candidates are evaluated (no cost 0 here) and
+        // the later Paeth wins the tie with Sub.
+        calls.set(0);
+        let mut plain_output = vec![0; LEN];
+        let plain = adaptive_filter_seeded(
+            &counting,
+            1,
+            LEN,
+            &vec![0; LEN],
+            &current,
+            &mut plain_output,
+            None,
+        );
+        assert_eq!(plain, RowFilter::Paeth);
+        assert_eq!(calls.get(), 4);
+
+        // Unseeded early exit at cost 0 is preserved: an identical previous
+        // row gives Up cost 0 after a single evaluation.
+        calls.set(0);
+        let mut zero_output = vec![0; LEN];
+        let zero = adaptive_filter_seeded(
+            &counting,
+            1,
+            LEN,
+            &current,
+            &current,
+            &mut zero_output,
+            None,
+        );
+        assert_eq!(zero, RowFilter::Up);
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]

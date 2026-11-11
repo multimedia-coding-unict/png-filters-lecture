@@ -40,7 +40,10 @@ preparing a **lecture about them**. Two things are in progress:
      first. If its mean absolute residual per byte is at or below the threshold
      (default `DEFAULT_GREEDY_THRESHOLD = 2.0`, settable with
      `Encoder::set_filter_threshold`), that filter is kept; otherwise it falls
-     back to the full adaptive search, reusing the already computed cost.
+     back to a seeded search in which the previous filter is the incumbent and
+     the loop exits early as soon as a checked candidate is selected over it
+     (`cost <= min_cost`), replacing the cost-0 early exit of the plain
+     adaptive search (`adaptive_filter_seeded`, seeded branch only).
      `--threshold` accepts a comma-separated list, so a sweep can compare
      several thresholds (rows/folders are named `greedy@<threshold>`). A
      `sweep` runs greedy at 2/4/8/16 by default; the sweep tables report each
@@ -69,16 +72,17 @@ preparing a **lecture about them**. Two things are in progress:
 
 ## Where the filter code lives (upstream, line numbers = this checkout)
 
-- `src/filter/mod.rs` — `Filter` enum (L24–36, default `Adaptive`, includes
-  `GreedyAdaptive`), internal `RowFilter` 0–4 (L71–77), `Filter::from_simple`
-  compression→filter mapping (L57–66), `filter_internal` (L405–542, 32-byte
-  chunks for autovectorization), `adaptive_filter` (L544–553, tries
+- `src/filter/mod.rs` — `Filter` enum (L27–39, default `Adaptive`, includes
+  `GreedyAdaptive`), internal `RowFilter` 0–4 (L75–81), `Filter::from_simple`
+  compression→filter mapping (L61–70), `filter_internal` (L409–546, 32-byte
+  chunks for autovectorization), `adaptive_filter` (L548–556, tries
   `[Up, Sub, Avg, Paeth]`, `<=` tie-break biases Paeth, early exit at cost 0),
-  `adaptive_filter_seeded` (L559–599, same search but reuses a precomputed
-  candidate cost), `greedy_adaptive_filter` (L607–639, previous-row reuse +
-  threshold), entry point `filter` (L641–673), cost functions `sum_buffer`
-  (L733–754, MSAD heuristic) and `entropy` + `ilog2i` (L677–730, MinEntropy
-  heuristic), decoder-side `unfilter` (L146–403).
+  `adaptive_filter_seeded` (L570–614, unseeded = plain search with cost-0
+  early exit; seeded = seed is the incumbent and the loop exits as soon as a
+  checked candidate is selected over it), `greedy_adaptive_filter` (L625–657,
+  previous-row reuse + threshold), entry point `filter` (L659–691), cost
+  functions `sum_buffer` (L751–772, MSAD heuristic) and `entropy` + `ilog2i`
+  (L695–748, MinEntropy heuristic), decoder-side `unfilter` (L150–407).
 - `src/filter/paeth.rs` — three equivalent Paeth predictors; the encoder uses
   `filter_paeth_fpnge` (L45–84).
 - `src/common.rs` — `BytesPerPixel` (L112–119), `Info::bpp_in_prediction`

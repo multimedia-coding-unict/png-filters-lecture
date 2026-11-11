@@ -108,7 +108,10 @@ The logic of the algorithm can be summarized as:
   trials, so it's recomputed once at the end (the `if filter_choice != Paeth`
   branch). Paeth is last, so its result is still sitting in `output`.
 - **Early exit at cost 0**: a perfectly predicted row (all-zero residuals,
-  e.g. a solid-colour region with Up) short-circuits the loop.
+  e.g. a solid-colour region with Up) short-circuits the loop. (The
+  `GreedyAdaptive` mode on the next page keeps this exit for its first row,
+  but replaces it with a selection-based early exit inside its fallback
+  search.)
 
 ## Heuristic 1 (default): minimum sum of absolute differences
 
