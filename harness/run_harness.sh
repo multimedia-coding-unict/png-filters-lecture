@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Execution harness for PNG filter-decision experiments.
 #
-# Runs the `filter_harness` example: encodes an input image through the normal
-# encoding process with the selected filter mode (default: adaptive), decodes the
-# result back (verifying the round-trip), and exports it into a result folder:
+# Wrapper around the `filter_harness` example: encodes one or more images with
+# the selected filter mode (default: adaptive), verifies the decode round-trip,
+# and exports the result plus per-scanline filter decisions and timings.
 #
-#   <out>/<image-stem>/
+# Inputs may be PNG files or directories. Directories are searched recursively
+# for *.png and keep their relative layout under the folder name:
+#
+#   <out>/<image-stem>/             for a file input
+#   <out>/<folder>/<relative-path>/ for a directory input
 #     times.json             encoding times, whole encode and filter path only
 #     encoded.png            image encoded with the selected filter mode
 #     decoded.png            decoder output re-encoded losslessly
@@ -16,12 +20,15 @@
 #
 # With `--sweep` every mode is run and each gets its own subfolder:
 #
-#   <out>/<image-stem>/
-#     times.json             one entry per mode, for comparison
-#     none/adaptive/...      the per-mode outputs shown above
+#   <out>/<image-stem>/<mode>/...
+#   <out>/<folder>/<relative-path>/<mode>/...
+#
+# In folder mode an unsupported image (16-bit, indexed, interlaced) is reported
+# and skipped; the remaining images are still processed and the script exits
+# non-zero at the end if any failed.
 #
 # Usage:
-#   harness/run_harness.sh [--out DIR] [--mode MODE | --sweep] [--repeat N] IMAGE [IMAGE...]
+#   harness/run_harness.sh [--out DIR] [--mode MODE | --sweep] [--repeat N] INPUT [INPUT...]
 #
 # Mode: none, sub, up, avg, paeth, adaptive (default), minentropy, or sweep.
 # Can also be set through the FILTER_MODE environment variable.
@@ -35,7 +42,7 @@ cd "$(dirname "$0")/.." # repository root, so `cargo run` finds the crate
 OUT="results"
 MODE="${FILTER_MODE:-adaptive}"
 REPEAT="${FILTER_REPEAT:-1}"
-IMAGES=()
+INPUTS=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -60,29 +67,16 @@ while [ $# -gt 0 ]; do
         exit 0
         ;;
     *)
-        IMAGES+=("$1")
+        INPUTS+=("$1")
         shift
         ;;
     esac
 done
 
-if [ ${#IMAGES[@]} -eq 0 ]; then
-    echo "error: no input image given (see --help)" >&2
+if [ ${#INPUTS[@]} -eq 0 ]; then
+    echo "error: no input given (see --help)" >&2
     exit 1
 fi
 
-mkdir -p "$OUT"
-
-for img in "${IMAGES[@]}"; do
-    if [ ! -f "$img" ]; then
-        echo "error: no such file: $img" >&2
-        exit 1
-    fi
-    stem="$(basename "$img")"
-    stem="${stem%.*}"
-    echo "=== $img -> $OUT/$stem ==="
-    cargo run --release --example filter_harness -- \
-        --repeat "$REPEAT" "$img" "$OUT/$stem" "$MODE"
-done
-
-echo "Results written under $OUT/"
+cargo run --release --quiet --example filter_harness -- \
+    --out "$OUT" --mode "$MODE" --repeat "$REPEAT" "${INPUTS[@]}"

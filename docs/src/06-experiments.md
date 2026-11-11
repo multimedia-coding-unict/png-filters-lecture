@@ -16,14 +16,25 @@ harness/run_harness.sh --mode none   tests/benches/kodim23.png
 # 3. A text/UI screenshot — watch Up (green) dominate
 harness/run_harness.sh tests/benches/lorem_ipsum_screenshot.png
 
-# 4. All modes at once, with timing — one command, one times.json
-harness/run_harness.sh --sweep --repeat 5 tests/benches/kodim23.png
-#    → results/kodim23/times.json: encode_total_ns + filter_prediction_ns per mode
-#      and results/kodim23/<mode>/ for the per-mode PNGs and maps
+# 4. All four kodim photos, all modes, with timing — one times.json per image,
+#    then one cumulative table over all four images at the end
+harness/run_harness.sh --sweep --repeat 5 \
+    tests/benches/kodim02.png tests/benches/kodim07.png \
+    tests/benches/kodim17.png tests/benches/kodim23.png
+#    → results/kodim02/times.json, results/kodim07/times.json, ...
+#      each with encode_total_ns + filter_prediction_ns per mode, plus
+#      results/<kodim>/<mode>/ for the per-mode PNGs and maps,
+#      and a final "cumulative over 4 image(s)" table on stdout
 
 # 5. The two heuristics side by side
 FILTER_MODE=adaptive   harness/run_harness.sh --out /tmp/fdemo tests/benches/kodim23.png
 FILTER_MODE=minentropy harness/run_harness.sh --out /tmp/fdemo tests/benches/kodim23.png
+
+# 6. A whole folder, recursively — unsupported images are reported and skipped
+harness/run_harness.sh --mode none --out /tmp/fdemo-folder tests/pngsuite
+#    → /tmp/fdemo-folder/pngsuite/<name>/ for every 8-bit, non-indexed,
+#      non-interlaced image (the suite also has 16-bit/indexed/interlaced
+#      files, so the script ends with a non-zero exit after listing them)
 ```
 
 Open `results/<image>/debug/filter_map.png` in an image viewer next to

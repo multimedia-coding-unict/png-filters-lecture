@@ -57,26 +57,39 @@ All `src/encoder.rs` line numbers above are from this checkout — local commits
 
 ```bash
 # from the repo root:
-harness/run_harness.sh [--out DIR] [--mode MODE | --sweep] [--repeat N] IMAGE [IMAGE...]
-# or directly:
-cargo run --release --example filter_harness -- [--repeat N] <input.png> [output_dir] [mode]
+harness/run_harness.sh [--out DIR] [--mode MODE | --sweep] [--repeat N] INPUT [INPUT...]
+# or directly (the example accepts the same inputs):
+cargo run --release --example filter_harness -- \
+    [--out DIR] [--mode MODE] [--repeat N] INPUT [INPUT...]
 # mode: none sub up avg paeth adaptive (default) minentropy sweep   (also: $FILTER_MODE)
+
+# several images at once, the four kodim photos:
+harness/run_harness.sh \
+    tests/benches/kodim02.png tests/benches/kodim07.png \
+    tests/benches/kodim17.png tests/benches/kodim23.png
 ```
+
+`INPUT` may be a PNG file or a folder. A folder is searched recursively for
+`*.png`; each image keeps its relative path under the folder name, e.g.
+`results/pngsuite/basn0g08/`. Folder mode reports unsupported images (16-bit,
+indexed, interlaced) and keeps going, then exits non-zero if any failed.
 
 `--sweep` runs every mode and gives each its own subfolder, so one command
 produces the whole comparison. `--repeat N` encodes each mode N times and
-reports the minimum, which smooths out timing noise.
+reports the minimum, which smooths out timing noise. After all images, a sweep
+prints one **cumulative table** for the whole input set: encoded bytes and times
+are summed over the images, bits/pixel is the mean of the per-image values.
 
-For each mode it:
+For each image and mode it:
 
 1. decodes the input (8-bit gray/gray+alpha/RGB/RGBA, non-interlaced preferred),
 2. encodes it with the chosen mode, **filter log and filter timing switched on**,
    reading both back from the writer,
 3. **decodes the result and verifies the round-trip** so the debug map can't lie,
-4. exports into `<out>/`:
+4. exports into `<out>/<image-stem>/`:
 
 ```text
-<out>/
+<out>/<image-stem>/
   times.json           encoding times, one entry per mode (see below)
   encoded.png          image encoded with the selected mode
   decoded.png          decoder output, re-encoded with NoFilter (plain lossless copy)
@@ -86,11 +99,14 @@ For each mode it:
     filters.json       [{"row": 0, "filter_id": 4, "filter_name": "paeth"}, ...]
 ```
 
-When sweeping, the per-mode files above live in `<out>/<mode>/` and only
-`times.json` sits at the top:
+For a folder input, replace `<out>/<image-stem>/` above with
+`<out>/<folder>/<relative-path-without-extension>/`.
+
+When sweeping, the per-mode files above live in `<out>/<image-stem>/<mode>/`
+and only `times.json` sits at the image level:
 
 ```text
-<out>/
+<out>/<image-stem>/
   times.json
   none/      encoded.png decoded.png summary.json debug/...
   sub/       ...
@@ -144,11 +160,13 @@ The color legend:
 <summary>Implementation reference</summary>
 
 In `examples/filter_harness.rs` (local commits `7bc5cec` / `3fa225c`, extended
-locally with timing and sweep): the log and timing are switched on at L150–151
-and read back at L155–156, the round-trip is verified at L336–344, the color
-legend (`filter_color`) is at L75–84, and `write_filter_map` errors out on
-interlaced input (L175–181). Sweep selection is parsed at L217–231 and
-`times.json` is written by `write_times_json` (L433–527).
+locally with timing, sweep and multi-image inputs): the log and timing are
+switched on at L163–164 and read back at L168–169, the round-trip is verified at
+L360–369, the color legend (`filter_color`) is at L88–97, and `write_filter_map`
+errors out on interlaced input (L185–190). Sweep selection is parsed at
+L239–253, folder expansion lives in `expand_input` (L658–703), `times.json`
+is written by `write_times_json` (L458–550), and the end-of-sweep cumulative
+table is `print_cumulative_table` (L584–647).
 
 </details>
 

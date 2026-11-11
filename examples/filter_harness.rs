@@ -1,20 +1,27 @@
 //! Execution harness for experimenting with PNG scanline filter decision modes.
 //!
-//! For a given input image this runs the normal encoding process once per
-//! selected filter mode (default: the encoder's own default, `adaptive`),
-//! decodes the result back and verifies the round-trip, and exports everything
-//! into an output folder:
+//! For each input image this runs the normal encoding process once per selected
+//! filter mode (default: the encoder's own default, `adaptive`), decodes the
+//! result back and verifies the round-trip, and exports everything into a
+//! per-image output folder:
 //!
 //! ```text
-//! <out>/
+//! <out>/<image-stem>/
 //!   times.json            encoding times, one entry per mode (see below)
-//!   <mode>/               only when sweeping; otherwise files land in <out>/
+//!   <mode>/               only when sweeping; otherwise files land here directly
 //!     encoded.png         image encoded with the selected filter mode
 //!     decoded.png         decoder output of the above, re-encoded losslessly
 //!     summary.json        encoded size and bits/pixel
 //!     debug/
 //!       filter_map.png    2D map: the color of scanline y is the filter chosen for it
 //!       filters.json      per-scanline filter decisions
+//! ```
+//!
+//! Inputs may be PNG files or directories. A directory is searched recursively
+//! for `*.png` and its images keep their relative layout under the folder name:
+//!
+//! ```text
+//! <out>/<folder>/<relative-path-without-extension>/
 //! ```
 //!
 //! `times.json` reports, for every mode:
@@ -28,13 +35,19 @@
 //! Usage:
 //!
 //! ```text
-//! cargo run --release --example filter_harness -- [--repeat N] <input.png> [output_dir] [mode]
+//! cargo run --release --example filter_harness -- \
+//!     [--out DIR] [--mode MODE] [--repeat N] INPUT [INPUT...]
 //! ```
 //!
 //! Modes are `none`, `sub`, `up`, `avg`, `paeth`, `adaptive` (default),
-//! `minentropy`, or `sweep` to run every mode and compare them. The input must
-//! be an 8-bit PNG (gray, gray+alpha, RGB or RGBA); non-interlaced input works
-//! best since the filter map is one row per scanline.
+//! `minentropy`, or `sweep` to run every mode and compare them. Inputs must be
+//! 8-bit PNGs (gray, gray+alpha, RGB or RGBA); non-interlaced input works best
+//! since the filter map is one row per scanline. Unsupported images in a folder
+//! are reported and skipped.
+//!
+//! A sweep prints one table per image and, after all images, a cumulative table
+//! that sums the encoded bytes and times over the images and averages
+//! bits/pixel, so the whole input set can be compared mode by mode.
 
 use std::{
     env, fs,
@@ -240,7 +253,7 @@ fn parse_selection(name: &str) -> Result<Selection, String> {
 }
 
 struct Args {
-    input: PathBuf,
+    inputs: Vec<PathBuf>,
     out_dir: PathBuf,
     selection: Selection,
     repeat: u32,
@@ -248,8 +261,10 @@ struct Args {
 
 fn usage() -> String {
     format!(
-        "usage: filter_harness [--repeat N] <input.png> [output_dir] [mode]\n\
+        "usage: filter_harness [--out DIR] [--mode MODE] [--repeat N] INPUT [INPUT...]\n\
+         INPUT may be a PNG file or a directory (searched recursively for *.png)\n\
          modes: {} (default: {DEFAULT_MODE}), sweep\n\
+         --out DIR: base output directory (default: results)\n\
          --repeat N: encode each mode N times and report the minimum (default: 1)",
         MODES.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
     )
@@ -257,7 +272,9 @@ fn usage() -> String {
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut repeat = 1u32;
-    let mut positional = Vec::new();
+    let mut out_dir = PathBuf::from("results");
+    let mut selection = parse_selection(DEFAULT_MODE).unwrap();
+    let mut inputs = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -274,37 +291,36 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 }
                 i += 2;
             }
+            "--out" | "-o" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("--out needs a value\n{}", usage()))?;
+                out_dir = PathBuf::from(value);
+                i += 2;
+            }
+            "--mode" | "-m" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("--mode needs a value\n{}", usage()))?;
+                selection = parse_selection(value)?;
+                i += 2;
+            }
             arg if arg.starts_with('-') => {
                 return Err(format!("unknown option: {arg}\n{}", usage()));
             }
             arg => {
-                positional.push(arg.to_string());
+                inputs.push(PathBuf::from(arg));
                 i += 1;
             }
         }
     }
 
-    if positional.is_empty() || positional.len() > 3 {
+    if inputs.is_empty() {
         return Err(usage());
     }
 
-    let input = PathBuf::from(&positional[0]);
-    let out_dir = match positional.get(1) {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            let stem = input
-                .file_stem()
-                .ok_or_else(|| format!("invalid input path: {}", input.display()))?;
-            PathBuf::from("results").join(stem)
-        }
-    };
-    let selection = match positional.get(2) {
-        Some(name) => parse_selection(name)?,
-        None => parse_selection(DEFAULT_MODE).unwrap(),
-    };
-
     Ok(Args {
-        input,
+        inputs,
         out_dir,
         selection,
         repeat,
@@ -533,6 +549,10 @@ fn write_times_json(
     fs::write(path, json)
 }
 
+fn min_duration(values: impl Iterator<Item = Duration>) -> Duration {
+    values.min().unwrap_or_default()
+}
+
 fn print_table(results: &[ModeResult]) {
     println!();
     println!(
@@ -540,29 +560,198 @@ fn print_table(results: &[ModeResult]) {
         "mode", "bytes", "bits/px", "encode ms", "filter ms", "filter %"
     );
     for result in results {
-        let totals: Vec<Duration> = result.runs.iter().map(|run| run.encode_total).collect();
-        let filters: Vec<Duration> = result
-            .runs
-            .iter()
-            .map(|run| run.filter_prediction)
-            .collect();
-        let (total_min, _, _) = min_median_mean(&totals);
-        let (filter_min, _, _) = min_median_mean(&filters);
-        let percent = if total_min == 0 {
+        let total_min = min_duration(result.runs.iter().map(|run| run.encode_total));
+        let filter_min = min_duration(result.runs.iter().map(|run| run.filter_prediction));
+        let percent = if total_min.is_zero() {
             0.0
         } else {
-            filter_min as f64 / total_min as f64 * 100.0
+            filter_min.as_secs_f64() / total_min.as_secs_f64() * 100.0
         };
         println!(
             "{:<12} {:>12} {:>10.2} {:>12.3} {:>12.3} {:>8.1}%",
             result.mode,
             result.encoded_bytes,
             result.bits_per_pixel,
-            total_min as f64 / 1e6,
-            filter_min as f64 / 1e6,
+            total_min.as_secs_f64() * 1e3,
+            filter_min.as_secs_f64() * 1e3,
             percent
         );
     }
+}
+
+/// One table for the whole input set: bytes and times are summed over the
+/// images, bits/pixel is the mean of the per-image values.
+fn print_cumulative_table(per_image: &[Vec<ModeResult>]) {
+    let images = per_image.len();
+    println!();
+    println!("=== cumulative over {images} image(s) ===");
+    println!(
+        "{:<12} {:>14} {:>12} {:>14} {:>14} {:>9}",
+        "mode", "total bytes", "avg bits/px", "total enc ms", "total filt ms", "filter %"
+    );
+
+    let Some(first) = per_image.first() else {
+        return;
+    };
+    for (index, first_mode) in first.iter().enumerate() {
+        let mut bytes = 0u64;
+        let mut bits_per_pixel = 0.0;
+        let mut total = Duration::ZERO;
+        let mut filter = Duration::ZERO;
+        let mut count = 0usize;
+
+        for image in per_image {
+            let Some(result) = image.get(index) else {
+                continue;
+            };
+            // Modes are always run in the same order; guard against a mismatch
+            // rather than silently mixing two different modes in one row.
+            debug_assert_eq!(result.mode, first_mode.mode);
+            bytes += result.encoded_bytes;
+            bits_per_pixel += result.bits_per_pixel;
+            total += min_duration(result.runs.iter().map(|run| run.encode_total));
+            filter += min_duration(result.runs.iter().map(|run| run.filter_prediction));
+            count += 1;
+        }
+
+        if count == 0 {
+            continue;
+        }
+        let percent = if total.is_zero() {
+            0.0
+        } else {
+            filter.as_secs_f64() / total.as_secs_f64() * 100.0
+        };
+        println!(
+            "{:<12} {:>14} {:>12.2} {:>14.3} {:>14.3} {:>8.1}%",
+            first_mode.mode,
+            bytes,
+            bits_per_pixel / count as f64,
+            total.as_secs_f64() * 1e3,
+            filter.as_secs_f64() * 1e3,
+            percent
+        );
+    }
+}
+
+fn is_png(path: &Path) -> bool {
+    path.extension()
+        .map(|ext| ext.to_string_lossy().eq_ignore_ascii_case("png"))
+        .unwrap_or(false)
+}
+
+fn collect_pngs(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_pngs(&path, out)?;
+        } else if file_type.is_file() && is_png(&path) {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Expand one CLI input into `(image, output directory)` jobs.
+fn expand_input(
+    input: &Path,
+    out_abs: &Path,
+) -> Result<Vec<(PathBuf, PathBuf)>, Box<dyn std::error::Error>> {
+    if input.is_dir() {
+        let root = fs::canonicalize(input)?;
+        let group = root
+            .file_name()
+            .ok_or_else(|| format!("cannot derive a folder name from {}", input.display()))?
+            .to_string_lossy()
+            .into_owned();
+        let group_out = out_abs.join(&group);
+        if group_out == root {
+            return Err(format!(
+                "output for {} would be the input folder itself; choose a different --out",
+                input.display()
+            )
+            .into());
+        }
+
+        let mut files = Vec::new();
+        collect_pngs(&root, &mut files)?;
+        // Do not pick up PNGs from a previous run if --out is inside the input.
+        files.retain(|path| !path.starts_with(&group_out));
+        files.sort();
+        if files.is_empty() {
+            return Err(format!("no PNG files found under {}", input.display()).into());
+        }
+
+        Ok(files
+            .into_iter()
+            .map(|image| {
+                let rel = image.strip_prefix(&root).unwrap_or(&image);
+                let rel_stem = rel.with_extension("");
+                (image, group_out.join(rel_stem))
+            })
+            .collect())
+    } else if input.is_file() {
+        let stem = input
+            .file_stem()
+            .ok_or_else(|| format!("invalid input path: {}", input.display()))?;
+        Ok(vec![(input.to_path_buf(), out_abs.join(stem))])
+    } else {
+        Err(format!("no such file or directory: {}", input.display()).into())
+    }
+}
+
+fn run_image(
+    input: &Path,
+    out_dir: &Path,
+    selections: &[(&'static str, Filter)],
+    repeat: u32,
+    sweep: bool,
+) -> Result<Vec<ModeResult>, Box<dyn std::error::Error>> {
+    println!("=== {} -> {} ===", input.display(), out_dir.display());
+    let (width, height, color_type, raw) = decode(input)?;
+    println!(
+        "{}: {}x{}, {:?}, {} raw bytes",
+        input.display(),
+        width,
+        height,
+        color_type,
+        raw.len()
+    );
+
+    let mut results = Vec::with_capacity(selections.len());
+    for (name, filter) in selections {
+        let mode_dir = if sweep {
+            out_dir.join(name)
+        } else {
+            out_dir.to_path_buf()
+        };
+        println!("=== {name} -> {} ===", mode_dir.display());
+        let result = run_mode(
+            &mode_dir, name, *filter, width, height, color_type, &raw, repeat,
+        )?;
+        println!(
+            "  encoded: {} bytes ({:.2} bits/pixel)",
+            result.encoded_bytes, result.bits_per_pixel
+        );
+        results.push(result);
+    }
+
+    write_times_json(
+        &out_dir.join("times.json"),
+        input,
+        width,
+        height,
+        repeat,
+        &results,
+    )?;
+
+    if sweep {
+        print_table(&results);
+    }
+    println!("Results written under {}", out_dir.display());
+    Ok(results)
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -573,59 +762,45 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let args = parse_args(&args)?;
 
-    let (width, height, color_type, raw) = decode(&args.input)?;
-    println!(
-        "{}: {}x{}, {:?}, {} raw bytes",
-        args.input.display(),
-        width,
-        height,
-        color_type,
-        raw.len()
-    );
+    fs::create_dir_all(&args.out_dir)?;
+    let out_abs = fs::canonicalize(&args.out_dir)?;
 
     let (selections, sweep): (Vec<(&'static str, Filter)>, bool) = match args.selection {
         Selection::Single(name, filter) => (vec![(name, filter)], false),
         Selection::Sweep => (MODES.to_vec(), true),
     };
 
-    let mut results = Vec::with_capacity(selections.len());
-    for (name, filter) in &selections {
-        let mode_dir = if sweep {
-            args.out_dir.join(name)
-        } else {
-            args.out_dir.clone()
-        };
-        println!("=== {name} -> {} ===", mode_dir.display());
-        let result = run_mode(
-            &mode_dir,
-            name,
-            *filter,
-            width,
-            height,
-            color_type,
-            &raw,
-            args.repeat,
-        )?;
-        println!(
-            "  encoded: {} bytes ({:.2} bits/pixel)",
-            result.encoded_bytes, result.bits_per_pixel
-        );
-        results.push(result);
+    let mut jobs = Vec::new();
+    let mut failures = 0usize;
+    let mut per_image: Vec<Vec<ModeResult>> = Vec::new();
+
+    for input in &args.inputs {
+        match expand_input(input, &out_abs) {
+            Ok(mut expanded) => jobs.append(&mut expanded),
+            Err(err) => {
+                eprintln!("error: {err}");
+                failures += 1;
+            }
+        }
     }
 
-    write_times_json(
-        &args.out_dir.join("times.json"),
-        &args.input,
-        width,
-        height,
-        args.repeat,
-        &results,
-    )?;
-
-    if sweep {
-        print_table(&results);
+    for (input, out_dir) in &jobs {
+        match run_image(input, out_dir, &selections, args.repeat, sweep) {
+            Ok(results) => per_image.push(results),
+            Err(err) => {
+                eprintln!("error: {}: {err}", input.display());
+                failures += 1;
+            }
+        }
     }
-    println!("Results written under {}", args.out_dir.display());
+
+    if sweep && !per_image.is_empty() {
+        print_cumulative_table(&per_image);
+    }
+
+    if failures != 0 {
+        return Err(format!("{failures} input(s) failed").into());
+    }
     Ok(())
 }
 

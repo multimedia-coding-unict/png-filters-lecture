@@ -17,17 +17,23 @@ preparing a **lecture about them**. Two things are in progress:
      are recorded at L1038 / L1061 / L1107 and in `StreamWriter::write`
      (~L2025); timing brackets each `filter(...)` call at L1055–1059 /
      L1102–1106 / L2011–2022.
-   - `examples/filter_harness.rs`: encodes an image with a chosen
-     `Filter` mode (`none sub up avg paeth adaptive minentropy`), or `sweep`
-     for all of them, verifies the decode round-trip, and exports
-     `encoded.png`, `decoded.png`, `summary.json` (bits/pixel), `times.json`
-     (whole-encode and filter-prediction times), and `debug/filter_map.png`
-     (one colored row per scanline: black/red/green/blue/yellow =
-     none/sub/up/avg/paeth) + `debug/filters.json` (per-row decisions).
-     `--repeat N` repeats each encode and reports the minimum.
+   - `examples/filter_harness.rs`: encodes one or more inputs (PNG files or
+     folders, searched recursively) with a chosen `Filter` mode
+     (`none sub up avg paeth adaptive minentropy`), or `sweep` for all of them,
+     verifies the decode round-trip, and exports per image `encoded.png`,
+     `decoded.png`, `summary.json` (bits/pixel), `times.json` (whole-encode and
+     filter-prediction times), and `debug/filter_map.png` (one colored row per
+     scanline: black/red/green/blue/yellow = none/sub/up/avg/paeth) +
+     `debug/filters.json` (per-row decisions). CLI:
+     `[--out DIR] [--mode MODE] [--repeat N] INPUT [INPUT...]`; `--repeat N`
+     repeats each encode and reports the minimum.
    - `harness/run_harness.sh`: wrapper around the example
-     (`harness/run_harness.sh [--out DIR] [--mode MODE | --sweep] [--repeat N] IMAGE...`,
-     or `FILTER_MODE=...`); outputs land in `results/` (gitignored).
+     (`harness/run_harness.sh [--out DIR] [--mode MODE | --sweep] [--repeat N] INPUT...`,
+     or `FILTER_MODE=...`). `INPUT` may be a file or a folder; folders are
+     searched recursively for `*.png` and keep their relative layout under
+     `<out>/<folder>/`. Unsupported images are reported and skipped. A sweep
+     ends with one cumulative table over all images (bytes/times summed,
+     bits/pixel averaged). Outputs land in `results/` (gitignored).
    - Known gap: the `FdeflateUltraFast` stored-fallback path
      (`src/encoder.rs` L1080–1083) writes filter byte 0 without logging it.
 
