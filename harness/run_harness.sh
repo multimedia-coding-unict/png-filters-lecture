@@ -28,10 +28,15 @@
 # non-zero at the end if any failed.
 #
 # Usage:
-#   harness/run_harness.sh [--out DIR] [--mode MODE | --sweep] [--repeat N] INPUT [INPUT...]
+#   harness/run_harness.sh [--out DIR] [--mode MODE | --sweep] \
+#       [--threshold T[,T...]] [--repeat N] INPUT [INPUT...]
 #
-# Mode: none, sub, up, avg, paeth, adaptive (default), minentropy, or sweep.
-# Can also be set through the FILTER_MODE environment variable.
+# Mode: none, sub, up, avg, paeth, adaptive (default), minentropy, greedy, or
+# sweep. Can also be set through the FILTER_MODE environment variable.
+# --threshold T[,T...] sets the greedy threshold (mean residual per byte) and
+# accepts a comma-separated list to sweep several values; in a sweep the greedy
+# rows are named greedy@<threshold>. Can also be set through the
+# FILTER_THRESHOLD environment variable.
 # --repeat N encodes each mode N times and reports the minimum (default: 1);
 # can also be set through the FILTER_REPEAT environment variable.
 
@@ -41,6 +46,7 @@ cd "$(dirname "$0")/.." # repository root, so `cargo run` finds the crate
 
 OUT="results"
 MODE="${FILTER_MODE:-adaptive}"
+THRESHOLD="${FILTER_THRESHOLD:-}"
 REPEAT="${FILTER_REPEAT:-1}"
 INPUTS=()
 
@@ -57,6 +63,10 @@ while [ $# -gt 0 ]; do
     --sweep)
         MODE="sweep"
         shift
+        ;;
+    --threshold)
+        THRESHOLD="$2"
+        shift 2
         ;;
     --repeat)
         REPEAT="$2"
@@ -78,5 +88,9 @@ if [ ${#INPUTS[@]} -eq 0 ]; then
     exit 1
 fi
 
-cargo run --release --quiet --example filter_harness -- \
-    --out "$OUT" --mode "$MODE" --repeat "$REPEAT" "${INPUTS[@]}"
+ARGS=(--out "$OUT" --mode "$MODE" --repeat "$REPEAT")
+if [ -n "$THRESHOLD" ]; then
+    ARGS+=(--threshold "$THRESHOLD")
+fi
+
+cargo run --release --quiet --example filter_harness -- "${ARGS[@]}" "${INPUTS[@]}"

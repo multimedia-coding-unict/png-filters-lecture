@@ -14,6 +14,11 @@ mod simd;
 /// Details on how each filter works can be found in the [PNG Book](http://www.libpng.org/pub/png/book/chapter09.html).
 ///
 /// The default filter is `Adaptive`, which uses heuristics to select the best filter for every row.
+///
+/// `GreedyAdaptive` is a cheaper variant of `Adaptive`: it first evaluates the
+/// filter chosen for the previous row and only tries the remaining filters when
+/// that filter's cost is above a threshold (see
+/// [`Encoder::set_filter_threshold`](crate::Encoder::set_filter_threshold)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Filter {
@@ -24,6 +29,10 @@ pub enum Filter {
     Paeth,
     Adaptive,
     MinEntropy,
+    /// Reuses the previous row's filter when its cost is low enough, otherwise
+    /// falls back to [`Filter::Adaptive`]. See
+    /// [`Encoder::set_filter_threshold`](crate::Encoder::set_filter_threshold).
+    GreedyAdaptive,
 }
 
 impl Default for Filter {
@@ -92,8 +101,45 @@ impl RowFilter {
             Filter::Up => Some(Self::Up),
             Filter::Avg => Some(Self::Avg),
             Filter::Paeth => Some(Self::Paeth),
-            Filter::Adaptive | Filter::MinEntropy => None,
+            Filter::Adaptive | Filter::MinEntropy | Filter::GreedyAdaptive => None,
         }
+    }
+}
+
+/// Default threshold for [`Filter::GreedyAdaptive`], expressed as the mean
+/// absolute residual per byte.
+///
+/// The value is deliberately conservative: when the previous row's filter
+/// already leaves residuals this small, evaluating the other filters rarely
+/// changes the compressed size by a meaningful amount.
+pub const DEFAULT_GREEDY_THRESHOLD: f64 = 2.0;
+
+/// Mutable state carried between consecutive scanline filter decisions.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FilterState {
+    /// The filter chosen for the previous scanline in the same pass or frame.
+    previous: Option<RowFilter>,
+    /// Mean absolute residual per byte at or below which
+    /// [`Filter::GreedyAdaptive`] reuses `previous` without evaluating the
+    /// other filters.
+    threshold: f64,
+}
+
+impl FilterState {
+    pub(crate) fn new(threshold: f64) -> Self {
+        Self {
+            previous: None,
+            threshold: threshold.max(0.0),
+        }
+    }
+
+    pub(crate) fn set_threshold(&mut self, threshold: f64) {
+        self.threshold = threshold.max(0.0);
+    }
+
+    /// Forget the previous scanline's choice, e.g. at a new Adam7 pass or frame.
+    pub(crate) fn reset(&mut self) {
+        self.previous = None;
     }
 }
 
@@ -503,26 +549,93 @@ fn adaptive_filter(
     current: &[u8],
     output: &mut [u8],
 ) -> RowFilter {
+    adaptive_filter_seeded(f, bpp, len, previous, current, output, None)
+}
+
+/// The shared adaptive search. `initial` may carry a filter whose output is
+/// already in `output` together with its cost, so it does not have to be
+/// recomputed. The iteration order and tie-breaking are unchanged, which means
+/// a seeded search returns the same filter as an unseeded one.
+fn adaptive_filter_seeded(
+    f: impl Fn(&[u8]) -> u64,
+    bpp: usize,
+    len: usize,
+    previous: &[u8],
+    current: &[u8],
+    output: &mut [u8],
+    initial: Option<(RowFilter, u64)>,
+) -> RowFilter {
     use RowFilter::*;
 
     let mut min_cost: u64 = u64::MAX;
     let mut filter_choice = RowFilter::NoFilter;
+    // Which filter's result is currently in `output`, if any.
+    let mut output_filter = initial.map(|(filter, _)| filter);
+
     for &filter in [Up, Sub, Avg, Paeth].iter() {
-        filter_internal(filter, bpp, len, previous, current, output);
-        let cost = f(output);
+        let cost = match initial {
+            Some((initial_filter, initial_cost)) if initial_filter == filter => initial_cost,
+            _ => {
+                filter_internal(filter, bpp, len, previous, current, output);
+                output_filter = Some(filter);
+                f(output)
+            }
+        };
+
         if cost <= min_cost {
             min_cost = cost;
             filter_choice = filter;
 
             if cost == 0 {
-                return filter_choice;
+                break;
             }
         }
     }
-    if filter_choice != Paeth {
+
+    if output_filter != Some(filter_choice) {
         filter_internal(filter_choice, bpp, len, previous, current, output);
     }
     filter_choice
+}
+
+/// Like [`adaptive_filter`], but first tries the filter chosen for the previous
+/// scanline. If that filter's cost is at or below `threshold` (a mean per
+/// byte), it is kept without evaluating the other filters. Otherwise this falls
+/// back to the full adaptive search, so the first row and any row that fails
+/// the threshold behave exactly like [`Filter::Adaptive`].
+#[allow(clippy::too_many_arguments)]
+fn greedy_adaptive_filter(
+    f: impl Fn(&[u8]) -> u64,
+    bpp: usize,
+    len: usize,
+    previous: &[u8],
+    current: &[u8],
+    output: &mut [u8],
+    previous_filter: Option<RowFilter>,
+    threshold: f64,
+) -> RowFilter {
+    if let Some(filter) = previous_filter {
+        filter_internal(filter, bpp, len, previous, current, output);
+        let cost = f(output);
+        // `threshold` is a mean per byte, so scale it by the row length before
+        // comparing it with the total cost.
+        if cost as f64 <= threshold * len as f64 {
+            return filter;
+        }
+        // Reuse the cost we just computed so falling back to the full search
+        // does not pay for the previous filter a second time.
+        return adaptive_filter_seeded(
+            f,
+            bpp,
+            len,
+            previous,
+            current,
+            output,
+            Some((filter, cost)),
+        );
+    }
+
+    adaptive_filter(f, bpp, len, previous, current, output)
 }
 
 pub(crate) fn filter(
@@ -531,18 +644,32 @@ pub(crate) fn filter(
     previous: &[u8],
     current: &[u8],
     output: &mut [u8],
+    state: &mut FilterState,
 ) -> RowFilter {
     let bpp = bpp.into_usize();
     let len = current.len();
 
-    match method {
+    let chosen = match method {
         Filter::Adaptive => adaptive_filter(sum_buffer, bpp, len, previous, current, output),
         Filter::MinEntropy => adaptive_filter(entropy, bpp, len, previous, current, output),
+        Filter::GreedyAdaptive => greedy_adaptive_filter(
+            sum_buffer,
+            bpp,
+            len,
+            previous,
+            current,
+            output,
+            state.previous,
+            state.threshold,
+        ),
         _ => {
             let filter = RowFilter::from_method(method).unwrap();
             filter_internal(filter, bpp, len, previous, current, output)
         }
-    }
+    };
+
+    state.previous = Some(chosen);
+    chosen
 }
 
 /// Estimate the value of i * log2(i) without using floating point operations,
@@ -641,7 +768,15 @@ mod test {
 
         let roundtrip = |kind: RowFilter, bpp: BytesPerPixel| {
             let mut output = vec![0; LEN.into()];
-            filter(kind.into(), bpp, &previous, &current, &mut output);
+            let mut state = FilterState::new(DEFAULT_GREEDY_THRESHOLD);
+            filter(
+                kind.into(),
+                bpp,
+                &previous,
+                &current,
+                &mut output,
+                &mut state,
+            );
             unfilter(kind, bpp, &previous, &mut output);
             assert_eq!(
                 output, expected,
@@ -684,7 +819,15 @@ mod test {
 
         let roundtrip = |kind: RowFilter, bpp: BytesPerPixel| {
             let mut output = vec![0; LEN.into()];
-            filter(kind.into(), bpp, &previous, &current, &mut output);
+            let mut state = FilterState::new(DEFAULT_GREEDY_THRESHOLD);
+            filter(
+                kind.into(),
+                bpp,
+                &previous,
+                &current,
+                &mut output,
+                &mut state,
+            );
             unfilter(kind, bpp, &previous, &mut output);
             assert_eq!(
                 output, expected,
@@ -714,6 +857,117 @@ mod test {
             for &bpp in bpps.iter() {
                 roundtrip(filter, bpp);
             }
+        }
+    }
+
+    #[test]
+    fn greedy_adaptive_reuses_previous_filter_below_threshold() {
+        const LEN: usize = 240;
+        let previous: Vec<u8> = (0..LEN).map(|i| i as u8).collect();
+        let current = previous.clone();
+        let mut output = vec![0; LEN];
+
+        // With an identical previous row, `Up` has cost 0 and is kept.
+        let mut state = FilterState::new(0.0);
+        state.previous = Some(RowFilter::Up);
+        let chosen = filter(
+            Filter::GreedyAdaptive,
+            BytesPerPixel::One,
+            &previous,
+            &current,
+            &mut output,
+            &mut state,
+        );
+
+        assert_eq!(chosen, RowFilter::Up);
+        assert!(output.iter().all(|&byte| byte == 0));
+        assert_eq!(state.previous, Some(RowFilter::Up));
+    }
+
+    #[test]
+    fn greedy_adaptive_keeps_previous_filter_with_high_threshold() {
+        const LEN: usize = 240;
+        let previous: Vec<u8> = (0..LEN).map(|i| i as u8).collect();
+        let current: Vec<u8> = (0..LEN).map(|i| (i * 7) as u8).collect();
+        let mut output = vec![0; LEN];
+
+        let mut state = FilterState::new(f64::INFINITY);
+        state.previous = Some(RowFilter::Sub);
+        let chosen = filter(
+            Filter::GreedyAdaptive,
+            BytesPerPixel::One,
+            &previous,
+            &current,
+            &mut output,
+            &mut state,
+        );
+
+        assert_eq!(chosen, RowFilter::Sub);
+    }
+
+    #[test]
+    fn greedy_adaptive_falls_back_to_adaptive() {
+        const LEN: usize = 240;
+        let previous = vec![0; LEN];
+        let current: Vec<u8> = (0..LEN).map(|i| (i * 7) as u8).collect();
+
+        let mut greedy_output = vec![0; LEN];
+        let mut state = FilterState::new(0.0);
+        state.previous = Some(RowFilter::Up);
+        let greedy = filter(
+            Filter::GreedyAdaptive,
+            BytesPerPixel::One,
+            &previous,
+            &current,
+            &mut greedy_output,
+            &mut state,
+        );
+
+        let mut adaptive_output = vec![0; LEN];
+        let mut adaptive_state = FilterState::new(0.0);
+        let adaptive = filter(
+            Filter::Adaptive,
+            BytesPerPixel::One,
+            &previous,
+            &current,
+            &mut adaptive_output,
+            &mut adaptive_state,
+        );
+
+        assert_eq!(greedy, adaptive);
+        assert_eq!(greedy_output, adaptive_output);
+    }
+
+    #[test]
+    fn seeded_adaptive_matches_unseeded() {
+        const LEN: usize = 240;
+        let previous: Vec<u8> = (0..LEN).map(|i| (i * 13 + 7) as u8).collect();
+        let current: Vec<u8> = (0..LEN).map(|i| (i * 29 + 3) as u8).collect();
+
+        for initial in [
+            RowFilter::Up,
+            RowFilter::Sub,
+            RowFilter::Avg,
+            RowFilter::Paeth,
+        ] {
+            let mut seeded_output = vec![0; LEN];
+            filter_internal(initial, 1, LEN, &previous, &current, &mut seeded_output);
+            let cost = sum_buffer(&seeded_output);
+            let seeded = adaptive_filter_seeded(
+                sum_buffer,
+                1,
+                LEN,
+                &previous,
+                &current,
+                &mut seeded_output,
+                Some((initial, cost)),
+            );
+
+            let mut plain_output = vec![0; LEN];
+            let plain = adaptive_filter(sum_buffer, 1, LEN, &previous, &current, &mut plain_output);
+
+            assert_eq!(seeded, plain);
+            assert_eq!(seeded_output, plain_output);
         }
     }
 

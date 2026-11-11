@@ -36,14 +36,19 @@
 //!
 //! ```text
 //! cargo run --release --example filter_harness -- \
-//!     [--out DIR] [--mode MODE] [--repeat N] INPUT [INPUT...]
+//!     [--out DIR] [--mode MODE] [--threshold T[,T...]] [--repeat N] INPUT [INPUT...]
 //! ```
 //!
 //! Modes are `none`, `sub`, `up`, `avg`, `paeth`, `adaptive` (default),
-//! `minentropy`, or `sweep` to run every mode and compare them. Inputs must be
-//! 8-bit PNGs (gray, gray+alpha, RGB or RGBA); non-interlaced input works best
-//! since the filter map is one row per scanline. Unsupported images in a folder
-//! are reported and skipped.
+//! `minentropy`, `greedy`, or `sweep` to run every mode and compare them.
+//! `greedy` uses [`Filter::GreedyAdaptive`], which reuses the previous
+//! scanline's filter when its cost is at or below `--threshold` (a mean
+//! absolute residual per byte). `--threshold` accepts a comma-separated list,
+//! so the greedy mode can be swept over several thresholds in one run; in a
+//! sweep the greedy rows are named `greedy@<threshold>`. Inputs must be 8-bit
+//! PNGs (gray, gray+alpha, RGB or RGBA); non-interlaced input works best since
+//! the filter map is one row per scanline. Unsupported images in a folder are
+//! reported and skipped.
 //!
 //! A sweep prints one table per image and, after all images, a cumulative table
 //! that sums the encoded bytes and times over the images and averages
@@ -57,7 +62,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use png::{BitDepth, ColorType, Decoder, Encoder, Filter};
+use png::{BitDepth, ColorType, Decoder, Encoder, Filter, DEFAULT_GREEDY_THRESHOLD};
 
 /// All selectable modes, in filter-type-byte order.
 const MODES: &[(&str, Filter)] = &[
@@ -68,9 +73,35 @@ const MODES: &[(&str, Filter)] = &[
     ("paeth", Filter::Paeth),
     ("adaptive", Filter::Adaptive),
     ("minentropy", Filter::MinEntropy),
+    ("greedy", Filter::GreedyAdaptive),
 ];
 
 const DEFAULT_MODE: &str = "adaptive";
+
+/// One concrete encoding configuration: a filter mode plus the threshold used
+/// by [`Filter::GreedyAdaptive`] (ignored by the other modes).
+#[derive(Clone)]
+struct ModeConfig {
+    name: String,
+    filter: Filter,
+    threshold: f64,
+}
+
+impl ModeConfig {
+    fn new(name: impl Into<String>, filter: Filter, threshold: f64) -> Self {
+        ModeConfig {
+            name: name.into(),
+            filter,
+            threshold,
+        }
+    }
+}
+
+/// Name used for a greedy run, including the threshold so that a threshold
+/// sweep produces distinct output folders and table rows.
+fn greedy_name(threshold: f64) -> String {
+    format!("greedy@{threshold}")
+}
 
 /// Name of a filter type byte, as recorded in the filter log.
 fn filter_name(id: u8) -> &'static str {
@@ -140,6 +171,7 @@ struct Encoded {
     filter_prediction: Duration,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode(
     path: &Path,
     width: u32,
@@ -147,6 +179,7 @@ fn encode(
     color_type: ColorType,
     data: &[u8],
     mode: Filter,
+    threshold: f64,
     record: bool,
 ) -> Result<Encoded, Box<dyn std::error::Error>> {
     let start = Instant::now();
@@ -160,6 +193,7 @@ fn encode(
     encoder.set_color(color_type);
     encoder.set_depth(BitDepth::Eight);
     encoder.set_filter(mode);
+    encoder.set_filter_threshold(threshold);
     encoder.set_filter_log(record);
     encoder.set_filter_timing(true);
 
@@ -205,6 +239,7 @@ fn write_filter_map(
         ColorType::Rgb,
         &map,
         Filter::NoFilter,
+        DEFAULT_GREEDY_THRESHOLD,
         false,
     )?;
     Ok(())
@@ -256,24 +291,48 @@ struct Args {
     inputs: Vec<PathBuf>,
     out_dir: PathBuf,
     selection: Selection,
+    /// Thresholds used by the greedy mode; more than one value sweeps them.
+    thresholds: Vec<f64>,
     repeat: u32,
 }
 
 fn usage() -> String {
     format!(
-        "usage: filter_harness [--out DIR] [--mode MODE] [--repeat N] INPUT [INPUT...]\n\
+        "usage: filter_harness [--out DIR] [--mode MODE] [--threshold T[,T...]] [--repeat N] INPUT [INPUT...]\n\
          INPUT may be a PNG file or a directory (searched recursively for *.png)\n\
          modes: {} (default: {DEFAULT_MODE}), sweep\n\
          --out DIR: base output directory (default: results)\n\
+         --threshold T[,T...]: greedy threshold(s), mean residual per byte (default: {DEFAULT_GREEDY_THRESHOLD})\n\
          --repeat N: encode each mode N times and report the minimum (default: 1)",
         MODES.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
     )
+}
+
+fn parse_thresholds(value: &str) -> Result<Vec<f64>, String> {
+    let mut thresholds = Vec::new();
+    for part in value.split(',') {
+        let part = part.trim();
+        let threshold: f64 = part
+            .parse()
+            .map_err(|_| format!("invalid threshold: {part}"))?;
+        if !threshold.is_finite() || threshold < 0.0 {
+            return Err(format!(
+                "threshold must be a finite, non-negative number: {part}"
+            ));
+        }
+        thresholds.push(threshold);
+    }
+    if thresholds.is_empty() {
+        return Err("--threshold needs at least one value".to_string());
+    }
+    Ok(thresholds)
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut repeat = 1u32;
     let mut out_dir = PathBuf::from("results");
     let mut selection = parse_selection(DEFAULT_MODE).unwrap();
+    let mut thresholds = vec![DEFAULT_GREEDY_THRESHOLD];
     let mut inputs = Vec::new();
 
     let mut i = 0;
@@ -305,6 +364,13 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 selection = parse_selection(value)?;
                 i += 2;
             }
+            "--threshold" | "-t" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("--threshold needs a value\n{}", usage()))?;
+                thresholds = parse_thresholds(value)?;
+                i += 2;
+            }
             arg if arg.starts_with('-') => {
                 return Err(format!("unknown option: {arg}\n{}", usage()));
             }
@@ -323,8 +389,34 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         inputs,
         out_dir,
         selection,
+        thresholds,
         repeat,
     })
+}
+
+/// Expand the CLI selection into the concrete runs for one image. A greedy
+/// mode expands to one run per threshold; the other modes ignore thresholds.
+fn mode_configs(selection: Selection, thresholds: &[f64]) -> Vec<ModeConfig> {
+    let mut configs = Vec::new();
+    let mut push = |name: &str, filter: Filter| {
+        if filter == Filter::GreedyAdaptive {
+            for &threshold in thresholds {
+                configs.push(ModeConfig::new(greedy_name(threshold), filter, threshold));
+            }
+        } else {
+            configs.push(ModeConfig::new(name, filter, DEFAULT_GREEDY_THRESHOLD));
+        }
+    };
+
+    match selection {
+        Selection::Single(name, filter) => push(name, filter),
+        Selection::Sweep => {
+            for &(name, filter) in MODES {
+                push(name, filter);
+            }
+        }
+    }
+    configs
 }
 
 struct RunTimes {
@@ -333,7 +425,7 @@ struct RunTimes {
 }
 
 struct ModeResult {
-    mode: &'static str,
+    mode: String,
     encoded_bytes: u64,
     bits_per_pixel: f64,
     runs: Vec<RunTimes>,
@@ -343,8 +435,7 @@ struct ModeResult {
 #[allow(clippy::too_many_arguments)]
 fn run_mode(
     mode_dir: &Path,
-    mode_name: &'static str,
-    mode: Filter,
+    config: &ModeConfig,
     width: u32,
     height: u32,
     color_type: ColorType,
@@ -355,7 +446,16 @@ fn run_mode(
 
     // Encode with the selected filter mode, recording the per-scanline decision.
     let encoded_path = mode_dir.join("encoded.png");
-    let first = encode(&encoded_path, width, height, color_type, raw, mode, true)?;
+    let first = encode(
+        &encoded_path,
+        width,
+        height,
+        color_type,
+        raw,
+        config.filter,
+        config.threshold,
+        true,
+    )?;
     let bytes = first.bytes;
 
     // Decode the result again and verify the round-trip against the source.
@@ -377,6 +477,7 @@ fn run_mode(
         color_type,
         &decoded,
         Filter::NoFilter,
+        DEFAULT_GREEDY_THRESHOLD,
         false,
     )?;
 
@@ -397,7 +498,8 @@ fn run_mode(
     fs::write(
         mode_dir.join("summary.json"),
         format!(
-            "{{\n  \"mode\": \"{mode_name}\",\n  \"encoded_bytes\": {bytes},\n  \"bits_per_pixel\": {bits_per_pixel:.4}\n}}\n"
+            "{{\n  \"mode\": \"{}\",\n  \"encoded_bytes\": {bytes},\n  \"bits_per_pixel\": {bits_per_pixel:.4}\n}}\n",
+            config.name
         ),
     )?;
 
@@ -409,7 +511,16 @@ fn run_mode(
         filter_prediction: first.filter_prediction,
     }];
     for _ in 1..repeat {
-        let run = encode(&encoded_path, width, height, color_type, raw, mode, false)?;
+        let run = encode(
+            &encoded_path,
+            width,
+            height,
+            color_type,
+            raw,
+            config.filter,
+            config.threshold,
+            false,
+        )?;
         runs.push(RunTimes {
             encode_total: run.encode_total,
             filter_prediction: run.filter_prediction,
@@ -417,7 +528,7 @@ fn run_mode(
     }
 
     Ok(ModeResult {
-        mode: mode_name,
+        mode: config.name.clone(),
         encoded_bytes: bytes,
         bits_per_pixel,
         runs,
@@ -705,9 +816,8 @@ fn expand_input(
 fn run_image(
     input: &Path,
     out_dir: &Path,
-    selections: &[(&'static str, Filter)],
+    configs: &[ModeConfig],
     repeat: u32,
-    sweep: bool,
 ) -> Result<Vec<ModeResult>, Box<dyn std::error::Error>> {
     println!("=== {} -> {} ===", input.display(), out_dir.display());
     let (width, height, color_type, raw) = decode(input)?;
@@ -720,17 +830,19 @@ fn run_image(
         raw.len()
     );
 
-    let mut results = Vec::with_capacity(selections.len());
-    for (name, filter) in selections {
+    // More than one run (a mode sweep or a threshold sweep) needs one
+    // subfolder per run so the outputs do not overwrite each other.
+    let sweep = configs.len() > 1;
+
+    let mut results = Vec::with_capacity(configs.len());
+    for config in configs {
         let mode_dir = if sweep {
-            out_dir.join(name)
+            out_dir.join(&config.name)
         } else {
             out_dir.to_path_buf()
         };
-        println!("=== {name} -> {} ===", mode_dir.display());
-        let result = run_mode(
-            &mode_dir, name, *filter, width, height, color_type, &raw, repeat,
-        )?;
+        println!("=== {} -> {} ===", config.name, mode_dir.display());
+        let result = run_mode(&mode_dir, config, width, height, color_type, &raw, repeat)?;
         println!(
             "  encoded: {} bytes ({:.2} bits/pixel)",
             result.encoded_bytes, result.bits_per_pixel
@@ -765,10 +877,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&args.out_dir)?;
     let out_abs = fs::canonicalize(&args.out_dir)?;
 
-    let (selections, sweep): (Vec<(&'static str, Filter)>, bool) = match args.selection {
-        Selection::Single(name, filter) => (vec![(name, filter)], false),
-        Selection::Sweep => (MODES.to_vec(), true),
-    };
+    let configs = mode_configs(args.selection, &args.thresholds);
+    let sweep = configs.len() > 1;
 
     let mut jobs = Vec::new();
     let mut failures = 0usize;
@@ -785,7 +895,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     for (input, out_dir) in &jobs {
-        match run_image(input, out_dir, &selections, args.repeat, sweep) {
+        match run_image(input, out_dir, &configs, args.repeat) {
             Ok(results) => per_image.push(results),
             Err(err) => {
                 eprintln!("error: {}: {err}", input.display());

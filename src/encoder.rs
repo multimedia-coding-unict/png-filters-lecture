@@ -16,7 +16,7 @@ use crate::common::{
     FrameControl, ImageOffset, Info, OffsetUnit, ParameterError, ParameterErrorKind,
     PixelDimensions, ScaledFloat, Unit,
 };
-use crate::filter::{filter, Filter, RowFilter};
+use crate::filter::{filter, Filter, FilterState, RowFilter, DEFAULT_GREEDY_THRESHOLD};
 use crate::text_metadata::{
     encode_iso_8859_1, EncodableTextChunk, ITXtChunk, TEXtChunk, TextEncodingError, ZTXtChunk,
 };
@@ -163,9 +163,11 @@ pub struct Encoder<'a, W: Write> {
 }
 
 /// Encoding options, internal type, forwarded to the Writer.
-#[derive(Default)]
 struct Options {
     filter: Filter,
+    /// Threshold for [`Filter::GreedyAdaptive`], as a mean absolute residual
+    /// per byte.
+    filter_threshold: f64,
     sep_def_img: bool,
     validate_sequence: bool,
     compression: DeflateCompression,
@@ -176,6 +178,21 @@ struct Options {
     /// Accumulate the time spent in the filter prediction path, exposed
     /// through [`Writer::filter_time`].
     filter_timing: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            filter: Filter::default(),
+            filter_threshold: DEFAULT_GREEDY_THRESHOLD,
+            sep_def_img: false,
+            validate_sequence: false,
+            compression: DeflateCompression::default(),
+            interlace: false,
+            filter_log: false,
+            filter_timing: false,
+        }
+    }
 }
 
 impl<'a, W: Write> Encoder<'a, W> {
@@ -341,6 +358,21 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// and either don't care about compression ratio or know exactly what works best for your images.
     pub fn set_filter(&mut self, filter: Filter) {
         self.options.filter = filter;
+    }
+
+    /// Set the threshold used by [`Filter::GreedyAdaptive`].
+    ///
+    /// The threshold is the mean absolute residual per byte at or below which
+    /// the filter chosen for the previous scanline is reused without evaluating
+    /// the other filters. Lower values make the encoder behave more like
+    /// [`Filter::Adaptive`] (more work, potentially smaller output); higher
+    /// values reuse the previous filter more often (less work, potentially
+    /// larger output). Negative values are clamped to zero.
+    ///
+    /// The default is [`DEFAULT_GREEDY_THRESHOLD`]. This setting has no effect
+    /// on the other filter modes.
+    pub fn set_filter_threshold(&mut self, threshold: f64) {
+        self.options.filter_threshold = threshold.max(0.0);
     }
 
     /// Enable recording of the filter chosen for each encoded scanline.
@@ -1002,6 +1034,7 @@ impl<W: Write> Writer<W> {
 
         let bpp = self.info.bpp_in_prediction();
         let filter_method = self.options.filter;
+        let mut filter_state = FilterState::new(self.options.filter_threshold);
 
         // The filter loop below is used for interlaced and regular lines, as write of the lines and
         // filtering depends on compression settings. The prediction needs to be reset between
@@ -1050,10 +1083,18 @@ impl<W: Write> Writer<W> {
                         current.resize(1 + line.len(), 0u8);
                         prev = &zeroed_prev[..line.len()];
                         filter_pass = pass;
+                        filter_state.reset();
                     }
 
                     let timer = self.filter_time.is_some().then(Instant::now);
-                    let filter_type = filter(filter_method, bpp, prev, line, &mut current[1..]);
+                    let filter_type = filter(
+                        filter_method,
+                        bpp,
+                        prev,
+                        line,
+                        &mut current[1..],
+                        &mut filter_state,
+                    );
                     if let Some(start) = timer {
                         self.record_filter_time(start.elapsed());
                     }
@@ -1097,10 +1138,18 @@ impl<W: Write> Writer<W> {
                         current.resize(line.len(), 0u8);
                         prev = &zeroed_prev[..line.len()];
                         filter_pass = pass;
+                        filter_state.reset();
                     }
 
                     let timer = self.filter_time.is_some().then(Instant::now);
-                    let filter_type = filter(filter_method, bpp, prev, line, &mut current);
+                    let filter_type = filter(
+                        filter_method,
+                        bpp,
+                        prev,
+                        line,
+                        &mut current,
+                        &mut filter_state,
+                    );
                     if let Some(start) = timer {
                         self.record_filter_time(start.elapsed());
                     }
@@ -1631,6 +1680,7 @@ pub struct StreamWriter<'a, W: Write> {
 
     bpp: BytesPerPixel,
     filter: Filter,
+    filter_state: FilterState,
     fctl: Option<FrameControl>,
     compression: DeflateCompression,
     /// The filter decision made for each encoded scanline, when recording was
@@ -1663,6 +1713,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         let bpp = writer.info.bpp_in_prediction();
         let in_len = writer.info.raw_row_length() - 1;
         let filter = writer.options.filter;
+        let filter_state = FilterState::new(writer.options.filter_threshold);
         let compression = writer.options.compression;
         let filter_log = writer.options.filter_log.then(Vec::new);
         let filter_time = writer.options.filter_timing.then(Duration::default);
@@ -1681,6 +1732,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
             filtered_buf,
             bpp,
             filter,
+            filter_state,
             width,
             height,
             line_len,
@@ -1721,6 +1773,13 @@ impl<'a, W: Write> StreamWriter<'a, W> {
     /// and either don't care about compression ratio or know exactly what works best for your images.
     pub fn set_filter(&mut self, filter: Filter) {
         self.filter = filter;
+    }
+
+    /// Set the threshold used by [`Filter::GreedyAdaptive`].
+    ///
+    /// See [`Encoder::set_filter_threshold`] for the meaning of the value.
+    pub fn set_filter_threshold(&mut self, threshold: f64) {
+        self.filter_state.set_threshold(threshold);
     }
 
     /// Set the fraction of time the following frames are going to be displayed,
@@ -1966,6 +2025,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         }
         let (line_len, to_write) = wrt.next_frame_info();
         self.prev_buf[..line_len].fill(0);
+        self.filter_state.reset();
         self.line_len = line_len;
         self.to_write = to_write;
         self.index = 0;
@@ -2016,6 +2076,7 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
                 &self.prev_buf,
                 &self.curr_buf,
                 &mut self.filtered_buf,
+                &mut self.filter_state,
             );
             if let Some(start) = timer {
                 if let Some(total) = &mut self.filter_time {
@@ -2588,6 +2649,7 @@ mod tests {
         roundtrip(Filter::Up)?;
         roundtrip(Filter::Avg)?;
         roundtrip(Filter::Paeth)?;
+        roundtrip(Filter::GreedyAdaptive)?;
 
         Ok(())
     }
