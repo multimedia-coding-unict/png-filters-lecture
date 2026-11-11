@@ -16,11 +16,10 @@ harness/run_harness.sh --mode none   tests/benches/kodim23.png
 # 3. A text/UI screenshot — watch Up (green) dominate
 harness/run_harness.sh tests/benches/lorem_ipsum_screenshot.png
 
-# 4. Compare all modes on one image in a loop, collect bits/pixel
-for m in none sub up avg paeth adaptive minentropy; do
-  harness/run_harness.sh --out /tmp/fdemo --mode "$m" tests/benches/kodim23.png
-  cat "/tmp/fdemo/kodim23/summary.json"
-done
+# 4. All modes at once, with timing — one command, one times.json
+harness/run_harness.sh --sweep --repeat 5 tests/benches/kodim23.png
+#    → results/kodim23/times.json: encode_total_ns + filter_prediction_ns per mode
+#      and results/kodim23/<mode>/ for the per-mode PNGs and maps
 
 # 5. The two heuristics side by side
 FILTER_MODE=adaptive   harness/run_harness.sh --out /tmp/fdemo tests/benches/kodim23.png
@@ -29,6 +28,8 @@ FILTER_MODE=minentropy harness/run_harness.sh --out /tmp/fdemo tests/benches/kod
 
 Open `results/<image>/debug/filter_map.png` in an image viewer next to
 `summary.json`; diff the maps of two modes to see which rows changed their mind.
+`times.json` adds the cost side: `encode_total_ns` is the whole encode,
+`filter_prediction_ns` is only the filter path inside the encoder.
 
 ## Questions to ask the class
 
@@ -51,6 +52,11 @@ Open `results/<image>/debug/filter_map.png` in an image viewer next to
 7. **Where does the filter byte live in the file?** Inflate the IDAT stream of
    `results/kodim23/encoded.png` (e.g. `python3 -c "import zlib,sys; ..."`) and
    look at the first byte of each row — it should match `filters.json`.
+8. **What does the filter decision cost?** Compare `filter_prediction_ns` in
+   `times.json` across modes. Fixed filters are one prediction per row;
+   `adaptive` is four; `minentropy` is four plus a 256-bin histogram each. Why
+   is the filter path still only ~0.5% of the encode on the photo, but a
+   visible share on the 128×128 icon?
 
 <details class="impl-ref" open>
 <summary>Implementation reference</summary>

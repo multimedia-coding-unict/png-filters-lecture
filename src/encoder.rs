@@ -1,7 +1,10 @@
 use borrow::Cow;
 use io::{Read, Write};
 use ops::{Deref, DerefMut};
-use std::{borrow, error, fmt, io, mem, ops, result};
+use std::{
+    borrow, error, fmt, io, mem, ops, result,
+    time::{Duration, Instant},
+};
 
 use crc32fast::Hasher as Crc32;
 use flate2::write::ZlibEncoder;
@@ -13,7 +16,7 @@ use crate::common::{
     FrameControl, ImageOffset, Info, OffsetUnit, ParameterError, ParameterErrorKind,
     PixelDimensions, ScaledFloat, Unit,
 };
-use crate::filter::{RowFilter, filter, Filter};
+use crate::filter::{filter, Filter, RowFilter};
 use crate::text_metadata::{
     encode_iso_8859_1, EncodableTextChunk, ITXtChunk, TEXtChunk, TextEncodingError, ZTXtChunk,
 };
@@ -170,6 +173,9 @@ struct Options {
     /// Record the filter decision made for each scanline, exposed through
     /// [`Writer::filter_log`].
     filter_log: bool,
+    /// Accumulate the time spent in the filter prediction path, exposed
+    /// through [`Writer::filter_time`].
+    filter_timing: bool,
 }
 
 impl<'a, W: Write> Encoder<'a, W> {
@@ -347,6 +353,18 @@ impl<'a, W: Write> Encoder<'a, W> {
         self.options.filter_log = on;
     }
 
+    /// Enable timing of the filter prediction path.
+    ///
+    /// When enabled, the time spent selecting and applying the scanline filter
+    /// is accumulated and can be retrieved with [`Writer::filter_time`]. The
+    /// measurement covers only the filter prediction itself, not the DEFLATE
+    /// compression of the filtered rows. This is a debugging and
+    /// experimentation aid; timing is disabled by default and costs two clock
+    /// reads per scanline.
+    pub fn set_filter_timing(&mut self, on: bool) {
+        self.options.filter_timing = on;
+    }
+
     /// Set the fraction of time every frame is going to be displayed, in seconds.
     ///
     /// *Note that this parameter can be set for each individual frame after
@@ -509,6 +527,9 @@ pub struct Writer<W: Write> {
     /// The filter decision made for each encoded scanline, when recording was
     /// enabled through [`Options::filter_log`].
     filter_log: Option<Vec<u8>>,
+    /// Time spent in the filter prediction path, when timing was enabled
+    /// through [`Options::filter_timing`].
+    filter_time: Option<Duration>,
 }
 
 /// Contains the subset of attributes of [Info] needed for [Writer] to function
@@ -596,6 +617,7 @@ fn write_fdat_chunk<W: Write>(
 impl<W: Write> Writer<W> {
     fn new(w: W, info: PartialInfo, options: Options) -> Writer<W> {
         let filter_log = options.filter_log.then(Vec::new);
+        let filter_time = options.filter_timing.then(Duration::default);
         Writer {
             w,
             info,
@@ -604,6 +626,7 @@ impl<W: Write> Writer<W> {
             animation_written: 0,
             iend_written: false,
             filter_log,
+            filter_time,
         }
     }
 
@@ -618,9 +641,24 @@ impl<W: Write> Writer<W> {
         self.filter_log.as_deref()
     }
 
+    /// The time spent in the filter prediction path, if timing was enabled
+    /// through [`Encoder::set_filter_timing`].
+    ///
+    /// This covers selecting and applying the scanline filter for every image
+    /// written so far, but not the DEFLATE compression of the filtered rows.
+    pub fn filter_time(&self) -> Option<Duration> {
+        self.filter_time
+    }
+
     fn record_filter(&mut self, filter_type: RowFilter) {
         if let Some(log) = &mut self.filter_log {
             log.push(filter_type as u8);
+        }
+    }
+
+    fn record_filter_time(&mut self, elapsed: Duration) {
+        if let Some(total) = &mut self.filter_time {
+            *total += elapsed;
         }
     }
 
@@ -1014,7 +1052,11 @@ impl<W: Write> Writer<W> {
                         filter_pass = pass;
                     }
 
+                    let timer = self.filter_time.is_some().then(Instant::now);
                     let filter_type = filter(filter_method, bpp, prev, line, &mut current[1..]);
+                    if let Some(start) = timer {
+                        self.record_filter_time(start.elapsed());
+                    }
                     current[0] = filter_type as u8;
                     self.record_filter(filter_type);
                     compressor.write_data(&current)?;
@@ -1057,7 +1099,11 @@ impl<W: Write> Writer<W> {
                         filter_pass = pass;
                     }
 
+                    let timer = self.filter_time.is_some().then(Instant::now);
                     let filter_type = filter(filter_method, bpp, prev, line, &mut current);
+                    if let Some(start) = timer {
+                        self.record_filter_time(start.elapsed());
+                    }
                     self.record_filter(filter_type);
                     zlib.write_all(&[filter_type as u8])?;
                     zlib.write_all(&current)?;
@@ -1590,6 +1636,9 @@ pub struct StreamWriter<'a, W: Write> {
     /// The filter decision made for each encoded scanline, when recording was
     /// enabled through [`Options::filter_log`].
     filter_log: Option<Vec<u8>>,
+    /// Time spent in the filter prediction path, when timing was enabled
+    /// through [`Options::filter_timing`].
+    filter_time: Option<Duration>,
 }
 
 impl<'a, W: Write> StreamWriter<'a, W> {
@@ -1616,6 +1665,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         let filter = writer.options.filter;
         let compression = writer.options.compression;
         let filter_log = writer.options.filter_log.then(Vec::new);
+        let filter_time = writer.options.filter_timing.then(Duration::default);
         let prev_buf = vec![0; in_len];
         let curr_buf = vec![0; in_len];
         let filtered_buf = vec![0; in_len];
@@ -1638,6 +1688,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
             fctl,
             compression,
             filter_log,
+            filter_time,
         })
     }
 
@@ -1649,6 +1700,16 @@ impl<'a, W: Write> StreamWriter<'a, W> {
     /// (0..=4).
     pub fn filter_log(&self) -> Option<&[u8]> {
         self.filter_log.as_deref()
+    }
+
+    /// The time spent in the filter prediction path, if timing was enabled
+    /// through [`Encoder::set_filter_timing`].
+    ///
+    /// This covers selecting and applying the scanline filter for every
+    /// scanline written so far, but not the DEFLATE compression of the
+    /// filtered rows.
+    pub fn filter_time(&self) -> Option<Duration> {
+        self.filter_time
     }
 
     /// Set the used filter type.
@@ -1948,6 +2009,7 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
         self.to_write -= written;
 
         if self.index == self.line_len {
+            let timer = self.filter_time.is_some().then(Instant::now);
             let filter_type = filter(
                 self.filter,
                 self.bpp,
@@ -1955,6 +2017,11 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
                 &self.curr_buf,
                 &mut self.filtered_buf,
             );
+            if let Some(start) = timer {
+                if let Some(total) = &mut self.filter_time {
+                    *total += start.elapsed();
+                }
+            }
             if let Some(log) = &mut self.filter_log {
                 log.push(filter_type as u8);
             }
@@ -2031,6 +2098,30 @@ mod tests {
                 assert_eq!(actual, expected);
             }
         }
+    }
+
+    #[test]
+    fn filter_timing_is_opt_in() {
+        let data = vec![0u8; 4 * 4 * 3];
+
+        let encode = |timing: bool| {
+            let mut out = Vec::new();
+            {
+                let mut encoder = Encoder::new(&mut out, 4, 4);
+                encoder.set_color(ColorType::Rgb);
+                encoder.set_depth(BitDepth::Eight);
+                encoder.set_filter(Filter::Adaptive);
+                encoder.set_filter_timing(timing);
+                let mut writer = encoder.write_header().unwrap();
+                writer.write_image_data(&data).unwrap();
+                let filter_time = writer.filter_time();
+                writer.finish().unwrap();
+                filter_time
+            }
+        };
+
+        assert_eq!(encode(false), None);
+        assert!(encode(true).is_some());
     }
 
     #[test]

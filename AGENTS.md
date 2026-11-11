@@ -10,22 +10,26 @@ preparing a **lecture about them**. Two things are in progress:
 
 1. **Debug outputs that show the filter choice per scanline** (local commits
    `7bc5cec` "first harness", `3fa225c` "refined" — *not upstream*):
-   - `src/encoder.rs`: `Encoder::set_filter_log()` (L346),
-     `Writer::filter_log()` / `StreamWriter::filter_log()`, and the internal
-     `record_filter()` (L621) that pushes each row's filter-type byte (0–4)
-     into a log, recorded at L1000 / L1019 / L1061 and in `StreamWriter::write`
-     (~L1958).
+   - `src/encoder.rs`: `Encoder::set_filter_log()` (L352) and
+     `set_filter_timing()` (L364); `Writer::filter_log()` / `filter_time()` and
+     `StreamWriter::filter_log()` / `filter_time()`; the internal
+     `record_filter()` (L653) and `record_filter_time()` (L659). Filter bytes
+     are recorded at L1038 / L1061 / L1107 and in `StreamWriter::write`
+     (~L2025); timing brackets each `filter(...)` call at L1055–1059 /
+     L1102–1106 / L2011–2022.
    - `examples/filter_harness.rs`: encodes an image with a chosen
-     `Filter` mode (`none sub up avg paeth adaptive minentropy`), verifies the
-     decode round-trip, and exports `encoded.png`, `decoded.png`,
-     `summary.json` (bits/pixel), and `debug/filter_map.png` (one colored row
-     per scanline: black/red/green/blue/yellow = none/sub/up/avg/paeth) +
-     `debug/filters.json` (per-row decisions).
+     `Filter` mode (`none sub up avg paeth adaptive minentropy`), or `sweep`
+     for all of them, verifies the decode round-trip, and exports
+     `encoded.png`, `decoded.png`, `summary.json` (bits/pixel), `times.json`
+     (whole-encode and filter-prediction times), and `debug/filter_map.png`
+     (one colored row per scanline: black/red/green/blue/yellow =
+     none/sub/up/avg/paeth) + `debug/filters.json` (per-row decisions).
+     `--repeat N` repeats each encode and reports the minimum.
    - `harness/run_harness.sh`: wrapper around the example
-     (`harness/run_harness.sh [--out DIR] [--mode MODE] IMAGE...`,
+     (`harness/run_harness.sh [--out DIR] [--mode MODE | --sweep] [--repeat N] IMAGE...`,
      or `FILTER_MODE=...`); outputs land in `results/` (gitignored).
    - Known gap: the `FdeflateUltraFast` stored-fallback path
-     (`src/encoder.rs` L1038–1041) writes filter byte 0 without logging it.
+     (`src/encoder.rs` L1080–1083) writes filter byte 0 without logging it.
 
 2. **Lecture slides as an mdbook in `docs/`** (commit `d113a6d` "first version
    of mdbook"). The pages in `docs/src/` are meant to be **projected during the
@@ -57,9 +61,9 @@ preparing a **lecture about them**. Two things are in progress:
   `filter_paeth_fpnge` (L45–84).
 - `src/common.rs` — `BytesPerPixel` (L112–119), `Info::bpp_in_prediction`
   (L831–833).
-- `src/encoder.rs` — call sites: `Writer::zlib_encode_image_data` (L906–1072;
-  filter byte written per row at L1018/L1062; NoCompression writes raw rows
-  with byte 0 at L998), `StreamWriter::write` (~L1929–1975).
+- `src/encoder.rs` — call sites: `Writer::zlib_encode_image_data` (L944–1118;
+  filter byte written per row at L1060/L1108; NoCompression writes raw rows
+  with byte 0 at L1036), `StreamWriter::write` (~L1989–2040).
 
 ## Conventions when editing the docs
 
