@@ -83,14 +83,6 @@ prediction = [ 0, 10, 20, 30]
 res        = <b>[10, 10, 10, 10]</b>
 </pre>
 
-<details class="impl-ref" open>
-<summary>Implementation reference</summary>
-
-`output[..bpp].copy_from_slice(...)` at
-[`filter_internal` L399](https://github.com/image-rs/image-png/blob/master/src/filter/mod.rs#L399).
-
-</details>
-
 ### 2. Up — predict from above
 
 `residual = x − b`, with `b = previous[i]` the byte at the same index of the
