@@ -1,3 +1,42 @@
+# png-filters-lecture
+
+> **This is a teaching fork of [`image-rs/image-png`](https://github.com/image-rs/image-png)**
+> (the `png` crate, v0.18.1). It exists for a **lecture on PNG predictive
+> (scanline) filters** and is not intended as an upstream contribution.
+
+## Lecture notes
+
+The lecture slides are an [mdbook](https://rust-lang.github.io/mdBook/) in
+[`docs/`](docs/), published on GitHub Pages at:
+
+**https://multimedia-coding-unict.github.io/png-filters-lecture/**
+
+The [`pages.yml`](.github/workflows/pages.yml) workflow rebuilds and
+redeploys them on every push that touches `docs/`; locally you can preview
+them with `cd docs && mdbook serve`.
+
+## Scope of this fork
+
+Local commits on top of upstream `master` add:
+
+- debug instrumentation in the encoder that logs the per-scanline filter
+  choice and the filter-prediction time (`Encoder::set_filter_log()` /
+  `set_filter_timing()` in `src/encoder.rs`);
+- a filter-decision harness (`examples/filter_harness.rs`,
+  `harness/run_harness.sh`, see "Filter-decision harness (local)" below) that
+  encodes images in every filter mode and exports the per-scanline filter
+  decisions and timings;
+- a custom `greedy` adaptive filter mode (`Filter::GreedyAdaptive` in
+  `src/filter/mod.rs`) that reuses the previous row's filter when its residual
+  on the current row is below a threshold, and otherwise falls back to a
+  seeded search;
+- the lecture notes in `docs/` that get published to GitHub Pages (link above).
+
+The decoder, the encoder's default behavior, and the test suite are unchanged
+from upstream.
+
+---
+
 # PNG Decoder/Encoder
 [![Build Status](https://github.com/image-rs/image-png/workflows/Rust%20CI/badge.svg)](https://github.com/image-rs/image-png/actions)
 [![Documentation](https://docs.rs/png/badge.svg)](https://docs.rs/png)

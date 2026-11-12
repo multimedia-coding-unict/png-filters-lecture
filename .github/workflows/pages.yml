@@ -1,0 +1,58 @@
+name: Deploy docs to GitHub Pages
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Queue deployments instead of cancelling a running one mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+# Minimal permissions needed by the official Pages actions.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin the same mdbook version that is installed locally (0.4.48).
+      - name: Install mdbook
+        run: |
+          curl -sSL -o mdbook.tar.gz \
+            https://github.com/rust-lang/mdBook/releases/download/v0.4.48/mdbook-v0.4.48-x86_64-unknown-linux-gnu.tar.gz
+          tar -xzf mdbook.tar.gz
+          sudo mv mdbook /usr/local/bin/mdbook
+          mdbook --version
+
+      # docs/book.toml sets build-dir = "book", so the site lands in docs/book/.
+      - name: Build the book
+        run: mdbook build docs
+
+      - name: Sanity-check the build
+        run: test -f docs/book/index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
